@@ -1,0 +1,23 @@
+import os
+from dataclasses import dataclass, field
+
+
+@dataclass
+class LLMConfig:
+    model: str = "claude-sonnet-4-6"
+    temperature: float = 0.1
+    max_tokens: int = 4096
+    api_key: str = field(default_factory=lambda: os.environ.get("ANTHROPIC_API_KEY", ""))
+
+
+@dataclass
+class AgentConfig:
+    llm: LLMConfig = field(default_factory=LLMConfig)
+    max_retries: int = 2
+    max_code_length: int = 2000
+    review_max_line_length: int = 100
+    review_max_complexity: int = 10
+    memory_file: str = "./session_memory.json"
+
+
+DEFAULT_CONFIG = AgentConfig()
