@@ -70,6 +70,11 @@ def _generate_commit_message(
 
     response = llm.invoke(prompt)
     raw = response.content if hasattr(response, "content") else str(response)
+    if isinstance(raw, list):
+        raw = "".join(
+            block.get("text", "") if isinstance(block, dict) and block.get("type") != "thinking" else ""
+            for block in raw
+        )
 
     # Try to parse structured output from the LLM's JSON response
     import json

@@ -10,8 +10,14 @@ AI 编程助手 Agent — 命令行入口
 """
 
 import argparse
+import io
 import json
 import sys
+
+# Fix UnicodeEncodeError on Windows GBK terminals
+if sys.stdout.encoding != "utf-8":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 from agent import create_agent, reset_agent, run
 from config import DEFAULT_CONFIG, AgentConfig, LLMConfig

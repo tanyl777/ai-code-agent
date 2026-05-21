@@ -34,10 +34,20 @@ SAFE_BUILTINS = {
 
 
 def _extract_code(text: str) -> str:
-    """Extract Python code from markdown code blocks or raw text."""
+    """Extract Python code from JSON response, markdown code blocks, or raw text."""
+    # Try JSON object with "code" key first (DeepSeek/v4 output format)
+    json_match = re.search(r'\{[^{}]*"code"\s*:\s*"((?:[^"\\]|\\.)*)"\s*[,}]', text, re.DOTALL)
+    if json_match:
+        code = json_match.group(1)
+        # Unescape JSON-escaped newlines and quotes
+        code = code.replace("\\n", "\n").replace("\\t", "\t").replace('\\"', '"')
+        return code.strip()
+
+    # Try markdown code blocks
     match = re.search(r"```(?:python)?\s*\n(.*?)```", text, re.DOTALL)
     if match:
         return match.group(1).strip()
+
     return text.strip()
 
 
@@ -85,6 +95,12 @@ def generate_and_run(user_request: str, llm) -> dict[str, Any]:
     for attempt in range(3):
         response = llm.invoke(full_prompt)
         raw = response.content if hasattr(response, "content") else str(response)
+        # Handle list content blocks (e.g. [{"type":"text","text":"..."}, {"type":"thinking",...}])
+        if isinstance(raw, list):
+            raw = "".join(
+                block.get("text", "") if isinstance(block, dict) and block.get("type") != "thinking" else ""
+                for block in raw
+            )
         code = _extract_code(raw)
 
         exec_result = _execute_code(code)

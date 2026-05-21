@@ -30,6 +30,7 @@ def get_llm() -> ChatAnthropic:
             model=cfg.model,
             temperature=cfg.temperature,
             max_tokens=cfg.max_tokens,
+            base_url=cfg.base_url,
             api_key=cfg.api_key or None,
         )
     return _llm
@@ -61,6 +62,7 @@ def create_agent(config: AgentConfig | None = None) -> CompiledStateGraph:
         model=cfg.llm.model,
         temperature=cfg.llm.temperature,
         max_tokens=cfg.llm.max_tokens,
+        base_url=cfg.llm.base_url,
         api_key=cfg.llm.api_key or None,
     )
 
