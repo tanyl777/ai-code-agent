@@ -122,17 +122,47 @@ def _generate_commit_message(
 
     # Try to parse structured output from the LLM's JSON response
     import json
+    import re
     try:
         # Extract JSON block
-        import re
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         if match:
             data = json.loads(match.group())
-            return data
+            # ── Normalize keys: LLMs may return description/summary/body_text etc. ──
+            normalized = {
+                "type": data.get("type", "chore"),
+                "scope": data.get("scope", ""),
+                "message": (
+                    data.get("message")
+                    or data.get("description")
+                    or data.get("summary")
+                    or data.get("title")
+                    or ""
+                ),
+                "body": (
+                    data.get("body")
+                    or data.get("body_text")
+                    or data.get("details")
+                    or ""
+                ),
+            }
+            return normalized
     except (json.JSONDecodeError, AttributeError):
         pass
 
-    return {"type": "unknown", "scope": "", "message": raw.strip()}
+    # ── Fallback: try to parse type(scope): message from plain text ──
+    fallback = re.match(
+        r"(\w+)(?:\(([^)]*)\))?\s*:\s*(.+)", raw.strip(), re.DOTALL,
+    )
+    if fallback:
+        return {
+            "type": fallback.group(1),
+            "scope": fallback.group(2) or "",
+            "message": fallback.group(3).strip(),
+            "body": "",
+        }
+
+    return {"type": "chore", "scope": "", "message": raw.strip(), "body": ""}
 
 
 @tool

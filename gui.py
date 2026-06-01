@@ -19,6 +19,7 @@ import sys
 import threading
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, filedialog
+from typing import Any
 
 if sys.stdout.encoding != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
@@ -26,7 +27,7 @@ if sys.stdout.encoding != "utf-8":
 
 from agent import get_llm, create_agent, reset_agent, reconfigure_llm, clear_cache, cache_stats
 from config import DEFAULT_CONFIG
-from tools.code_interpreter import generate_and_run
+from tools.code_interpreter import generate_and_run, _execute_code, SAFE_BUILTINS
 from tools.static_reviewer import review_code
 from tools.git_commit import _get_diffs, _generate_commit_message, _get_changed_files, _get_branch
 from tools.test_generator import generate_and_test
@@ -56,6 +57,16 @@ PROVIDERS = {
 
 SETTINGS_FILE = os.path.join(os.path.dirname(__file__), ".gui_settings.json")
 
+# VS Code 风格主题
+THEMES = {
+    "Dark (默认)": {"bg":"#1e1e1e","panel":"#252526","editor_bg":"#1e1e1e","editor_fg":"#d4d4d4",
+                     "output_bg":"#1e1e1e","output_fg":"#d4d4d4","line_bg":"#252526",
+                     "accent":"#007acc","btn_bg":"#0e639c","btn_fg":"#fff","status_bg":"#007acc","status_fg":"#fff"},
+    "Light":       {"bg":"#fff","panel":"#f3f3f3","editor_bg":"#fff","editor_fg":"#333",
+                     "output_bg":"#fff","output_fg":"#333","line_bg":"#f3f3f3",
+                     "accent":"#007acc","btn_bg":"#007acc","btn_fg":"#fff","status_bg":"#007acc","status_fg":"#fff"},
+}
+
 
 # ═══════════════════════════════════════════════════
 # 设置对话框
@@ -63,11 +74,13 @@ SETTINGS_FILE = os.path.join(os.path.dirname(__file__), ".gui_settings.json")
 class SettingsDialog(tk.Toplevel):
     """Modal settings dialog for API configuration."""
 
-    def __init__(self, parent, on_connect):
+    def __init__(self, parent, on_connect, current_theme="Dark (默认)"):
         super().__init__(parent)
         self.on_connect = on_connect
+        self._parent_gui: Any = None  # set by parent after creation
+        self.current_theme = current_theme
         self.title("⚙️ API 设置")
-        self.geometry("500x380")
+        self.geometry("500x440")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -77,8 +90,6 @@ class SettingsDialog(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
     def _build(self):
-        pad = {"padx": 12, "pady": 6}
-
         # ── API Key ──
         frame = ttk.LabelFrame(self, text="🔑 API 密钥", padding=10)
         frame.pack(fill=tk.X, padx=12, pady=(12, 4))
@@ -99,7 +110,7 @@ class SettingsDialog(tk.Toplevel):
         frame2.pack(fill=tk.X, padx=12, pady=4)
 
         r1 = ttk.Frame(frame2)
-        r1.pack(fill=tk.X, **pad)
+        r1.pack(fill=tk.X, padx=12, pady=6)
         ttk.Label(r1, text="厂商:", width=8).pack(side=tk.LEFT)
         self.provider_var = tk.StringVar(value="DeepSeek")
         self.provider_cb = ttk.Combobox(r1, textvariable=self.provider_var,
@@ -108,19 +119,31 @@ class SettingsDialog(tk.Toplevel):
         self.provider_cb.bind("<<ComboboxSelected>>", self._on_provider)
 
         r2 = ttk.Frame(frame2)
-        r2.pack(fill=tk.X, **pad)
+        r2.pack(fill=tk.X, padx=12, pady=6)
         ttk.Label(r2, text="模型:", width=8).pack(side=tk.LEFT)
         self.model_var = tk.StringVar()
         self.model_cb = ttk.Combobox(r2, textvariable=self.model_var, width=38)
         self.model_cb.pack(side=tk.LEFT, padx=5)
 
         r3 = ttk.Frame(frame2)
-        r3.pack(fill=tk.X, **pad)
+        r3.pack(fill=tk.X, padx=12, pady=6)
         ttk.Label(r3, text="API URL:", width=8).pack(side=tk.LEFT)
         self.url_var = tk.StringVar()
         ttk.Entry(r3, textvariable=self.url_var, width=42).pack(side=tk.LEFT, padx=5)
 
         self._on_provider()
+
+        # ── 主题 ──
+        frame3 = ttk.LabelFrame(self, text="🎨 主题 (仿 VSCode)", padding=10)
+        frame3.pack(fill=tk.X, padx=12, pady=4)
+        tr = ttk.Frame(frame3); tr.pack(fill=tk.X, padx=12, pady=6)
+        ttk.Label(tr, text="配色:", width=8).pack(side=tk.LEFT)
+        self.theme_var = tk.StringVar(value=self.current_theme)
+        tc = ttk.Combobox(tr, textvariable=self.theme_var, values=list(THEMES.keys()),
+                          state="readonly", width=28)
+        tc.pack(side=tk.LEFT, padx=5)
+        tc.bind("<<ComboboxSelected>>", lambda e: self._preview_theme())
+        ttk.Button(tr, text="预览", command=self._preview_theme).pack(side=tk.LEFT, padx=5)
 
         # ── Buttons ──
         btn_frame = ttk.Frame(self)
@@ -144,12 +167,19 @@ class SettingsDialog(tk.Toplevel):
         if p == "自定义":
             self.model_cb.config(state="normal")
 
+    def _preview_theme(self):
+        """Live preview theme on main window."""
+        name = self.theme_var.get()
+        if hasattr(self, '_parent_gui') and self._parent_gui:
+            self._parent_gui._apply_theme(name)
+
     def _get_values(self):
         return {
             "api_key": self.api_key_var.get().strip(),
             "provider": self.provider_var.get(),
             "model": self.model_var.get().strip(),
             "base_url": self.url_var.get().strip(),
+            "theme": self.theme_var.get() if hasattr(self, 'theme_var') else "Dark (默认)",
         }
 
     def _test_connection(self):
@@ -222,6 +252,9 @@ class SettingsDialog(tk.Toplevel):
                     self.url_var.set(data["base_url"])
                 if data.get("api_key"):
                     self.api_key_var.set(data["api_key"])
+                if data.get("theme") in THEMES:
+                    self.theme_var.set(data["theme"])
+                    self.current_theme = data["theme"]
         except (OSError, json.JSONDecodeError):
             pass
 
@@ -237,11 +270,46 @@ class AIAgentGUI:
         self.root.minsize(780, 500)
         self._llm_ready = False
         self._last_test_code = ""
+        self._current_theme = "Dark (默认)"
+        self._load_theme()
 
         self._setup_style()
         self._build_menu()
         self._build_main()
-        self._auto_connect()
+        threading.Thread(target=self._auto_connect, daemon=True).start()
+
+    def _load_theme(self):
+        try:
+            if os.path.exists(SETTINGS_FILE):
+                d = json.load(open(SETTINGS_FILE, encoding="utf-8"))
+                if d.get("theme") in THEMES: self._current_theme = d["theme"]
+        except: pass
+
+    def _apply_theme(self, name):
+        if name not in THEMES: return
+        self._current_theme = name
+        t = THEMES[name]
+        self.root.configure(bg=t["bg"])
+        # ttk
+        s = ttk.Style()
+        s.configure("TNotebook", background=t["bg"])
+        s.configure("TNotebook.Tab", background=t["panel"], foreground=t["editor_fg"])
+        s.map("TNotebook.Tab", background=[("selected", t["accent"])], foreground=[("selected", t["btn_fg"])])
+        s.configure("TFrame", background=t["bg"])
+        # tk widgets
+        self._recolor(self.root, t)
+
+    def _recolor(self, parent, t):
+        for c in parent.winfo_children():
+            try:
+                cl = c.winfo_class()
+                if cl in ("Frame","Labelframe"): c.configure(bg=t["bg"])
+                elif cl == "Label": c.configure(bg=t["bg"])
+                elif cl == "Text": c.configure(bg=t["editor_bg"], fg=t["editor_fg"], insertbackground=t["editor_fg"])
+                elif cl == "Canvas": c.configure(bg=t["line_bg"])
+                elif cl == "Entry": c.configure(bg=t["editor_bg"], fg=t["editor_fg"], insertbackground=t["editor_fg"])
+            except: pass
+            self._recolor(c, t)
 
     def _setup_style(self):
         style = ttk.Style()
@@ -282,16 +350,18 @@ class AIAgentGUI:
         self.conn_label = ttk.Label(header, text="未连接", style="Subtitle.TLabel")
         self.conn_label.pack(side=tk.RIGHT)
 
-        # ── Welcome banner (shown when not connected) ──
-        self.banner = ttk.Frame(self.root, relief=tk.GROOVE, padding=20)
+        # ── Connection hint (thin bar, shown when not connected) ──
+        self.banner = tk.Frame(self.root, bg="#5a3e00", height=28)
         self._build_banner()
 
-        # ── Notebook (hidden until connected) ──
+        # ── Notebook (always visible; LLM tabs check connection) ──
         self.notebook = ttk.Notebook(self.root, padding=5)
         self._build_code_tab()
         self._build_review_tab()
         self._build_test_tab()
         self._build_commit_tab()
+        self._build_editor_tab()
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=(0, 5))
 
         # ── Status bar ──
         self.status_var = tk.StringVar(value="就绪 — 请通过菜单 设置 → ⚙️ API 配置 连接模型")
@@ -302,43 +372,25 @@ class AIAgentGUI:
         status_bar.pack(fill=tk.X, side=tk.BOTTOM)
 
     def _build_banner(self):
-        """Welcome banner shown before connection."""
+        """Connection hint bar."""
         for w in self.banner.winfo_children():
             w.destroy()
-        ttk.Label(
-            self.banner, text="👋 欢迎使用 AI 编程助手",
-            font=("Microsoft YaHei UI", 18, "bold"),
-        ).pack(pady=(10, 5))
-        ttk.Label(
-            self.banner, text="基于 LangChain + 多模型支持 (DeepSeek / Claude / Ollama)",
-            font=("Microsoft YaHei UI", 10), foreground="#666",
-        ).pack(pady=(0, 10))
-        ttk.Separator(self.banner, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=40, pady=8)
-
-        steps = [
-            ("1️⃣", "点击菜单栏  设置 → ⚙️ API 配置"),
-            ("2️⃣", "选择模型厂商（DeepSeek / Claude / Ollama）"),
-            ("3️⃣", "填入 API Key → 点击 💾 保存并连接"),
-            ("4️⃣", "连接成功后即可使用下方功能"),
-        ]
-        for icon, text in steps:
-            ttk.Label(self.banner, text=f"  {icon}  {text}",
-                      font=("Microsoft YaHei UI", 11)).pack(anchor=tk.W, padx=60, pady=3)
-
-        ttk.Separator(self.banner, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=40, pady=8)
-        ttk.Button(
-            self.banner, text="⚙️ 前往设置", command=self._open_settings,
-            style="Primary.TButton",
-        ).pack(pady=(5, 15))
+        tk.Label(self.banner, text="⚠ 未连接 AI 模型  |  代码生成/审查/测试/提交 不可用  |  📄 文本编辑器可正常使用",
+                font=("Microsoft YaHei UI", 9), bg="#5a3e00", fg="#ffcc00").pack(side=tk.LEFT, padx=12, pady=4)
+        tk.Button(self.banner, text="⚙️ 连接", command=self._open_settings,
+                  font=("Microsoft YaHei UI", 8), bg="#007acc", fg="white",
+                  relief=tk.FLAT, padx=8).pack(side=tk.RIGHT, padx=8, pady=2)
 
     # ═══════════════════════════════════════════════
     # Connection management
     # ═══════════════════════════════════════════════
     def _open_settings(self):
-        SettingsDialog(self.root, self._on_connected)
+        dlg = SettingsDialog(self.root, self._on_connected, self._current_theme)
+        dlg._parent_gui = self
 
     def _on_connected(self, settings, success):
         if success:
+            if settings.get("theme"): self._apply_theme(settings["theme"])
             self._llm_ready = True
             self.conn_dot.config(text="🟢")
             self.conn_label.config(
@@ -347,31 +399,22 @@ class AIAgentGUI:
             )
             self._set_status(f"🟢 已连接 — {settings['provider']} / {settings['model']}")
             self.banner.pack_forget()
-            self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=(0, 5))
 
     def _auto_connect(self):
-        """Try to auto-connect with saved settings on startup."""
+        """Try auto-connect (runs in thread)."""
         try:
             if os.path.exists(SETTINGS_FILE):
                 with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 api_key = data.get("api_key", "")
                 if api_key:
-                    reconfigure_llm(
-                        api_key=api_key,
-                        model=data.get("model", ""),
-                        base_url=data.get("base_url", ""),
-                    )
-                    # Quick test
+                    reconfigure_llm(api_key=api_key, model=data.get("model",""), base_url=data.get("base_url",""))
                     llm = get_llm()
                     resp = llm.invoke("hi")
-                    self._on_connected(data, True)
+                    self.root.after(0, lambda: self._on_connected(data, True))
                     return
-        except Exception:
-            pass  # Silent fail — user will connect manually
-
-        # Not connected — show banner
-        self.banner.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        except Exception: pass
+        self.root.after(0, lambda: self.banner.pack(fill=tk.X, padx=5, pady=(0, 3)))
 
     def _ensure_ready(self) -> bool:
         if not self._llm_ready:
@@ -385,45 +428,137 @@ class AIAgentGUI:
         messagebox.showinfo("缓存清理", f"已清理 {removed} 条\n当前: {stats['entries']} 条 / {stats['size_kb']} KB")
 
     # ═══════════════════════════════════════════════
+    # ═══════════════════════════════════════════════
     # Tab 1: 代码生成
     # ═══════════════════════════════════════════════
     def _build_code_tab(self):
         tab = ttk.Frame(self.notebook, padding=12)
         self.notebook.add(tab, text="  📝 代码生成  ")
 
+        # ── Row 1: Input ──
         ttk.Label(tab, text="用自然语言描述你想要的功能：", style="Section.TLabel").pack(anchor=tk.W)
         hint = ttk.Label(tab, text='提示：越具体越好，例如: 实现一个二分查找函数，输入有序列表和目标值，返回索引或 -1',
                          foreground="#999", font=("Microsoft YaHei UI", 8))
         hint.pack(anchor=tk.W)
 
-        self.code_input = scrolledtext.ScrolledText(tab, height=4, font=("Consolas", 10),
+        input_frame = ttk.Frame(tab)
+        input_frame.pack(fill=tk.X, pady=(5, 0))
+        self.code_input = scrolledtext.ScrolledText(input_frame, height=3, font=("Consolas", 10),
                                                      relief=tk.GROOVE, borderwidth=1)
-        self.code_input.pack(fill=tk.X, pady=(5, 0))
+        self.code_input.pack(fill=tk.X, side=tk.LEFT, expand=True)
         self.code_input.insert("1.0", "实现一个归并排序函数，输入列表返回排序后的列表")
 
-        btn_frame = ttk.Frame(tab)
-        btn_frame.pack(fill=tk.X, pady=10)
-        ttk.Button(btn_frame, text="🚀 生成并执行", command=self._do_code_gen).pack(side=tk.LEFT, padx=5)
+        gen_btn_frame = ttk.Frame(input_frame)
+        gen_btn_frame.pack(side=tk.RIGHT, padx=(5, 0), fill=tk.Y)
+        ttk.Button(gen_btn_frame, text="🚀\n生成", command=self._do_code_gen, width=6).pack(pady=2)
+
+        # ── Action bar (pack FIRST at bottom to ensure visibility) ──
+        code_btn_frame = ttk.Frame(tab)
+        code_btn_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(5, 0))
+        ttk.Button(code_btn_frame, text="▶ 运行", command=self._do_run_code).pack(side=tk.LEFT, padx=3)
+        ttk.Button(code_btn_frame, text="🐛 Debug", command=self._do_debug_code).pack(side=tk.LEFT, padx=3)
+        ttk.Button(code_btn_frame, text="💾 保存", command=self._save_generated_code).pack(side=tk.LEFT, padx=3)
+        ttk.Button(code_btn_frame, text="🔍 审查 →", command=self._jump_gen_to_review).pack(side=tk.LEFT, padx=3)
         self.code_json_var = tk.BooleanVar()
-        ttk.Checkbutton(btn_frame, text="JSON 输出", variable=self.code_json_var).pack(side=tk.LEFT, padx=10)
-        ttk.Button(btn_frame, text="清空输出", command=lambda: self.code_output.delete("1.0", tk.END)).pack(
-            side=tk.RIGHT, padx=5)
+        ttk.Checkbutton(code_btn_frame, text="JSON", variable=self.code_json_var).pack(side=tk.LEFT, padx=5)
+        ttk.Button(code_btn_frame, text="清空", command=self._clear_code_tab).pack(side=tk.RIGHT, padx=3)
 
-        ttk.Separator(tab, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=5)
-        ttk.Label(tab, text="执行结果：", style="Section.TLabel").pack(anchor=tk.W)
-        self.code_output = scrolledtext.ScrolledText(
-            tab, font=("Consolas", 10), relief=tk.GROOVE, borderwidth=1,
-        )
-        self.code_output.pack(fill=tk.BOTH, expand=True)
+        # ── Row 2: Code + output (resizable PanedWindow) ──
+        ttk.Label(tab, text="代码（可直接编辑, 点击行号设断点, 拖拽分隔条调整大小）：",
+                  style="Section.TLabel").pack(anchor=tk.W, pady=(10, 0))
 
-        # Action bar (shown after generation)
-        self.code_actions = ttk.Frame(tab)
-        self.code_actions.pack(fill=tk.X, pady=(5, 0))
-        ttk.Button(self.code_actions, text="💾 保存代码", command=self._save_generated_code).pack(side=tk.LEFT, padx=5)
-        ttk.Button(self.code_actions, text="🔍 审查这段代码 →", command=self._jump_gen_to_review).pack(side=tk.LEFT, padx=5)
-        self.code_actions.pack_forget()  # hidden until generation completes
+        self.code_pane = tk.PanedWindow(tab, orient=tk.VERTICAL, bg="#555",
+                                         sashwidth=8, sashrelief=tk.RAISED)
+        self.code_pane.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
+
+        # Top: editor + line numbers
+        editor_frame = tk.Frame(self.code_pane)
+        self._breakpoints: set[int] = set()
+        self.line_canvas = tk.Canvas(editor_frame, width=40, bg="#252525", highlightthickness=0)
+        self.line_canvas.pack(side=tk.LEFT, fill=tk.Y)
+        self.line_canvas.bind("<Button-1>", self._on_line_click)
+        self.code_editor = tk.Text(editor_frame, font=("Consolas", 11), relief=tk.FLAT,
+                                    bg="#1e1e1e", fg="#d4d4d4", insertbackground="white",
+                                    undo=True, wrap=tk.NONE)
+        self.code_editor.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.code_editor.insert("1.0", "# 点击 生成 按钮，或直接在此编写/粘贴代码\n")
+        self.code_editor.bind("<KeyRelease>", lambda e: self._update_line_numbers())
+        self.code_editor.bind("<MouseWheel>", lambda e: self._update_line_numbers())
+        self.code_pane.add(editor_frame, stretch="always")
+
+        # Bottom: execution output
+        self.run_output = tk.Text(self.code_pane, font=("Consolas", 10), relief=tk.FLAT,
+                                   bg="#f5f5f5", fg="#333", state=tk.DISABLED)
+        self.code_pane.add(self.run_output, stretch="always")
+
+        self._update_line_numbers()
 
         self._last_generated_code = ""
+
+    def _line_height(self): return 17
+
+    def _update_line_numbers(self):
+        """Redraw line numbers with breakpoint markers."""
+        self.line_canvas.delete("all")
+        code = self.code_editor.get("1.0", tk.END)
+        n = code.count("\n") + (0 if code.endswith("\n") else 1)
+        lh = self._line_height()
+        for i in range(1, n + 1):
+            y0 = (i - 1) * lh + 2
+            if i in self._breakpoints:
+                self.line_canvas.create_rectangle(0, y0, 38, y0 + lh, fill="#e51400", outline="#e51400")
+                self.line_canvas.create_text(19, y0 + lh/2, text=str(i), fill="white", font=("Consolas", 7, "bold"))
+            else:
+                self.line_canvas.create_text(30, y0 + lh/2, text=str(i), anchor=tk.E,
+                                              fill="#888", font=("Consolas", 7))
+
+    def _on_line_click(self, event):
+        """Toggle breakpoint on clicked line number."""
+        ln = event.y // self._line_height() + 1
+        total = int(self.code_editor.index("end-1c").split(".")[0])
+        if 1 <= ln <= total + 1:
+            if ln in self._breakpoints: self._breakpoints.discard(ln)
+            else: self._breakpoints.add(ln)
+            self._update_line_numbers()
+
+    def _clear_code_tab(self):
+        """Clear editor, output, and breakpoints."""
+        self._breakpoints.clear()
+        self.code_editor.delete("1.0", tk.END)
+        self.run_output.config(state=tk.NORMAL)
+        self.run_output.delete("1.0", tk.END)
+        self.run_output.config(state=tk.DISABLED)
+        self._update_line_numbers()
+
+    def _get_code_from_editor(self) -> str:
+        """Get current code from the editor."""
+        code = self.code_editor.get("1.0", tk.END).strip()
+        if code.startswith("# 点击"): return ""
+        return code
+
+    def _set_code_editor(self, code: str):
+        """Set code in the editor (UI thread safe)."""
+        def _do():
+            self.code_editor.delete("1.0", tk.END)
+            self.code_editor.insert("1.0", code)
+            self._update_line_numbers()
+        self.root.after(0, _do)
+
+    def _append_run_output(self, text: str):
+        """Append to the run output area."""
+        def _do():
+            self.run_output.config(state=tk.NORMAL)
+            self.run_output.insert(tk.END, text)
+            self.run_output.see(tk.END)
+            self.run_output.config(state=tk.DISABLED)
+        self.root.after(0, _do)
+
+    def _clear_run_output(self):
+        def _do():
+            self.run_output.config(state=tk.NORMAL)
+            self.run_output.delete("1.0", tk.END)
+            self.run_output.config(state=tk.DISABLED)
+        self.root.after(0, _do)
 
     def _do_code_gen(self):
         if not self._ensure_ready(): return
@@ -438,17 +573,115 @@ class AIAgentGUI:
         try:
             llm = get_llm()
             result = generate_and_run(request, llm)
-            self._show_result(self.code_output, result, is_json=self.code_json_var.get())
             if result["status"] == "success":
-                self._last_generated_code = result.get("content", "")
-                self._show_actions(self.code_actions)
+                code = result.get("content", "")
+                self._set_code_editor(code)
+                self._last_generated_code = code
+                self._clear_run_output()
+                self._append_run_output(f"✅ 生成成功 (第{result['metadata']['attempts']}次尝试)\n{'═'*40}\n")
+                stdout = result.get("metadata", {}).get("stdout", "")
+                if stdout:
+                    self._append_run_output(stdout)
+                self._set_status(f"✅ 成功 (第{result['metadata']['attempts']}次尝试)")
             else:
-                self._hide_actions(self.code_actions)
-            ok = result["status"] == "success"
-            self._set_status(f"{'✅ 成功' if ok else '❌ 失败'} (第{result['metadata']['attempts']}次尝试)")
+                self._set_code_editor(result.get("content", ""))
+                self._clear_run_output()
+                self._append_run_output(f"❌ 执行失败 (已尝试{result['metadata']['attempts']}次修正)\n{'═'*40}\n")
+                exc = result.get("metadata", {}).get("exception", "")
+                if exc:
+                    self._append_run_output(exc)
+                self._set_status("❌ 失败")
         except Exception as e:
-            self._show_error(self.code_output, e)
+            self._clear_run_output()
+            self._append_run_output(f"❌ 异常: {e}")
             self._set_status(f"❌ 错误: {e}")
+
+    def _do_run_code(self):
+        """Run the code currently in the editor."""
+        code = self._get_code_from_editor()
+        if not code:
+            messagebox.showwarning("提示", "代码为空，请先生成代码或粘贴代码")
+            return
+        self._set_status("⏳ 正在执行...")
+        self._clear_run_output()
+        self._append_run_output("▶ 运行中...\n" + "═" * 40 + "\n")
+        self._run_async(lambda: self._sync_run_code(code))
+
+    def _sync_run_code(self, code: str):
+        try:
+            result = _execute_code(code)
+            if result["exception"] is None:
+                if result["stdout"]:
+                    self._append_run_output(result["stdout"])
+                else:
+                    self._append_run_output("(无输出)\n")
+                self._append_run_output("\n✅ 执行成功")
+                self._set_status("✅ 运行成功")
+            else:
+                if result["stdout"]:
+                    self._append_run_output(result["stdout"])
+                self._append_run_output(f"\n❌ 运行错误:\n{result['exception']}")
+                self._set_status("❌ 运行错误")
+        except Exception as e:
+            self._append_run_output(f"\n❌ 异常: {e}")
+            self._set_status(f"❌ 错误: {e}")
+
+    def _do_debug_code(self):
+        """Run code in debug mode — show line trace, full var dump at breakpoints."""
+        code = self._get_code_from_editor()
+        if not code:
+            messagebox.showwarning("提示", "代码为空，请先生成代码或粘贴代码")
+            return
+        bps = self._breakpoints.copy()
+        info = f"{len(bps)} 个断点" if bps else "全部行追踪"
+        self._set_status(f"🐛 Debug 运行中 ({info})...")
+        self._clear_run_output()
+        self._append_run_output(f"🐛 Debug — 断点: {sorted(bps) if bps else '全部行'}\n{'═'*60}\n")
+        self._run_async(lambda: self._sync_debug_code(code, bps))
+
+    def _sync_debug_code(self, code: str, breakpoints: set[int]):
+        import io as _io, sys as _sys, traceback as _tb
+        source_lines = code.split("\n")
+        trace_lines = []
+        bps = breakpoints
+
+        def _trace_func(frame, event, arg):
+            if event == "line":
+                ln = frame.f_lineno
+                is_bp = ln in bps
+                if is_bp or not bps:
+                    src = source_lines[ln-1].strip() if ln <= len(source_lines) else f"<L{ln}>"
+                    marker = "🔴" if is_bp else "  "
+                    trace_lines.append(f"{marker} L{ln:>3d}: {src}")
+                    if is_bp:
+                        trace_lines.append(f"    {'═'*20} 断点 L{ln} 变量快照 {'═'*20}")
+                        for k, v in frame.f_locals.items():
+                            if not k.startswith("__"):
+                                trace_lines.append(f"    📌 {k} = {repr(v)[:120]}")
+                        trace_lines.append(f"    {'═'*54}")
+            return _trace_func
+
+        sc, ec = _io.StringIO(), _io.StringIO()
+        _os, _oe = _sys.stdout, _sys.stderr
+        _sys.stdout, _sys.stderr = sc, ec
+        try:
+            _sys.settrace(_trace_func)
+            exec(code, {"__builtins__": SAFE_BUILTINS, "__name__": "__main__"})
+            _sys.settrace(None)
+            self._append_run_output("\n".join(trace_lines) + "\n" + "─"*60 + "\n")
+            if sc.getvalue(): self._append_run_output(f"【输出】\n{sc.getvalue()}")
+            if ec.getvalue(): self._append_run_output(f"【错误】\n{ec.getvalue()}")
+            hits = len([l for l in trace_lines if l.startswith("🔴")])
+            self._append_run_output(f"\n✅ Debug 完成 — {len(trace_lines)} 行追踪, {hits} 个断点命中")
+            self._set_status(f"🐛 Debug 完成 — {hits} 断点命中")
+        except Exception:
+            _sys.settrace(None)
+            self._append_run_output("\n".join(trace_lines) + "\n" + "─"*60 + "\n")
+            if sc.getvalue(): self._append_run_output(f"【输出】\n{sc.getvalue()}")
+            self._append_run_output(f"\n❌ 异常:\n{_tb.format_exc()}")
+            self._set_status("🐛 Debug — 执行出错")
+        finally:
+            _sys.stdout, _sys.stderr = _os, _oe
 
     # ═══════════════════════════════════════════════
     # Tab 2: 代码审查
@@ -615,24 +848,28 @@ class AIAgentGUI:
         tab = ttk.Frame(self.notebook, padding=12)
         self.notebook.add(tab, text="  📋 Commit 生成  ")
 
-        # Row 1: Repo path
+        # Row 1: Repo path (LOCAL directory, not URL!)
         top_row = ttk.Frame(tab)
         top_row.pack(fill=tk.X)
-        ttk.Label(top_row, text="Git 仓库路径：", style="Section.TLabel").pack(side=tk.LEFT)
+        ttk.Label(top_row, text="本地仓库：", style="Section.TLabel").pack(side=tk.LEFT)
         self.repo_path_var = tk.StringVar(value=".")
         ttk.Entry(top_row, textvariable=self.repo_path_var, width=30).pack(side=tk.LEFT, padx=5)
         ttk.Button(top_row, text="📂 浏览", command=self._browse_repo).pack(side=tk.LEFT, padx=2)
         ttk.Button(top_row, text="📊 查看变更", command=self._do_show_diff).pack(side=tk.LEFT, padx=2)
         ttk.Button(top_row, text="📦 暂存全部", command=self._do_stage_all).pack(side=tk.LEFT, padx=2)
+        ttk.Label(top_row, text="  ← 本地目录，如 . 或 C:\\项目", foreground="#999",
+                  font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
 
-        # Row 2: Remote URL
+        # Row 2: Remote URL (GitHub URL for push)
         remote_row = ttk.Frame(tab)
         remote_row.pack(fill=tk.X, pady=(5, 0))
-        ttk.Label(remote_row, text="GitHub 远程：", style="Section.TLabel").pack(side=tk.LEFT)
-        self.remote_var = tk.StringVar()
+        ttk.Label(remote_row, text="推送地址：", style="Section.TLabel").pack(side=tk.LEFT)
+        self.remote_var = tk.StringVar(value="https://github.com/tanyl777/ai-code-agent")
         ttk.Entry(remote_row, textvariable=self.remote_var, width=50).pack(side=tk.LEFT, padx=5)
-        ttk.Button(remote_row, text="🔗 设置远程", command=self._do_set_remote).pack(side=tk.LEFT, padx=2)
+        ttk.Button(remote_row, text="🔗 设置", command=self._do_set_remote).pack(side=tk.LEFT, padx=2)
         ttk.Button(remote_row, text="📋 检测", command=self._do_detect_remote).pack(side=tk.LEFT, padx=2)
+        ttk.Label(remote_row, text="  ← 推送目标，如 https://github.com/...", foreground="#999",
+                  font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
 
         ttk.Label(tab, text="变更预览：", style="Section.TLabel").pack(anchor=tk.W, pady=(10, 0))
         self.diff_output = scrolledtext.ScrolledText(
@@ -673,14 +910,11 @@ class AIAgentGUI:
 
     def _do_stage_all(self):
         """Stage all changes (git add -A)."""
-        from pathlib import Path
         from tools.git_commit import git_add
-        repo = Path(self.repo_path_var.get()).resolve()
-        if not (repo / ".git").exists():
-            messagebox.showwarning("提示", "选择的目录不是 Git 仓库")
-            return
+        repo = self._check_repo()
+        if not repo: return
         self._set_status("⏳ 正在暂存所有文件...")
-        ok, out = git_add(str(repo))
+        ok, out = git_add(repo)
         if ok:
             self._set_status("✅ 已暂存全部变更 (git add -A)")
             self._do_show_diff()
@@ -689,12 +923,9 @@ class AIAgentGUI:
 
     def _do_set_remote(self):
         """Set the origin remote URL."""
-        from pathlib import Path
         import subprocess
-        repo = Path(self.repo_path_var.get()).resolve()
-        if not (repo / ".git").exists():
-            messagebox.showwarning("提示", "选择的目录不是 Git 仓库")
-            return
+        repo = self._check_repo()
+        if not repo: return
         url = self.remote_var.get().strip()
         if not url:
             messagebox.showwarning("提示", "请输入 GitHub 仓库 URL")
@@ -725,12 +956,34 @@ class AIAgentGUI:
                 self.remote_var.set(remote)
                 self._set_status(f"检测到远程: {remote}")
 
-    def _do_show_diff(self):
+    def _check_repo(self) -> str | None:
+        """Validate repo path. Return repo string or None (with error popup)."""
         from pathlib import Path
-        repo = Path(self.repo_path_var.get()).resolve()
+        raw = self.repo_path_var.get().strip()
+        if raw.startswith("http://") or raw.startswith("https://"):
+            messagebox.showwarning(
+                "路径错误",
+                f"「本地仓库」需要本地目录路径，不是网址。\n\n"
+                f"你输入的是:\n  {raw}\n\n"
+                f"正确做法:\n"
+                f"  1. 先用 git clone {raw} 克隆到本地\n"
+                f"  2. 本地仓库填克隆后的目录路径（如 . 或项目文件夹）\n"
+                f"  3. 推送地址填 {raw}"
+            )
+            return None
+        repo = Path(raw).resolve()
         if not (repo / ".git").exists():
-            messagebox.showwarning("提示", "选择的目录不是 Git 仓库")
-            return
+            messagebox.showwarning(
+                "不是 Git 仓库",
+                f"目录下没有 .git 文件夹:\n  {repo}\n\n"
+                f"请用 git init 初始化，或 git clone 克隆仓库。"
+            )
+            return None
+        return str(repo)
+
+    def _do_show_diff(self):
+        repo = self._check_repo()
+        if not repo: return
         self._set_status("⏳ 正在读取 git diff...")
         try:
             staged, unstaged = _get_diffs(str(repo))
@@ -749,13 +1002,10 @@ class AIAgentGUI:
 
     def _do_commit(self):
         if not self._ensure_ready(): return
-        from pathlib import Path
-        repo = Path(self.repo_path_var.get()).resolve()
-        if not (repo / ".git").exists():
-            messagebox.showwarning("提示", "选择的目录不是 Git 仓库")
-            return
+        repo = self._check_repo()
+        if not repo: return
         self._set_status("⏳ 正在生成 commit message...")
-        self._run_async(lambda: self._sync_commit(str(repo)))
+        self._run_async(lambda: self._sync_commit(repo))
 
     def _sync_commit(self, repo: str):
         try:
@@ -779,30 +1029,36 @@ class AIAgentGUI:
                 files = _get_changed_files(repo)
             llm = get_llm()
             msg = _generate_commit_message(staged, unstaged, files, llm)
+
+            # Build clean Conventional Commits message
+            msg_type = msg.get("type", "chore")
+            msg_scope = msg.get("scope", "")
+            msg_message = msg.get("message", "")
+            msg_body = msg.get("body", "")
+
+            # Build display
+            header = f"{msg_type}({msg_scope}): {msg_message}" if msg_scope else f"{msg_type}: {msg_message}"
+
             if self.commit_json_var.get():
                 self.commit_output.delete("1.0", tk.END)
                 self.commit_output.insert("1.0", json.dumps(msg, ensure_ascii=False, indent=2))
             else:
-                body = msg.get("body", "")
-                lines = [
-                    f"📝 建议的 Commit Message (branch: {branch})\n",
-                    f"  {msg.get('type', '?')}({msg.get('scope', '?')}): {msg.get('message', msg.get('content', str(msg)))}\n",
-                ]
-                if body:
-                    lines.append(f"\n{body}\n")
+                lines = [f"📝 建议的 Commit Message (branch: {branch})\n", f"  {header}\n"]
+                if msg_body:
+                    lines.append(f"\n{msg_body}\n")
                 lines.append(f"\n📁 涉及文件 ({len(files)}):")
                 for f in files[:15]:
                     lines.append(f"  • {f}")
-                lines.append("\n💡 如满意，复制上方内容执行 git commit")
+                lines.append("\n💡 如满意，点击下方按钮执行提交")
                 self.commit_output.delete("1.0", tk.END)
                 self.commit_output.insert("1.0", "\n".join(lines))
+
+            # Store for commit/push actions
+            self._last_commit_msg = header
+            if msg_body:
+                self._last_commit_msg += f"\n\n{msg_body}"
+
             self._set_status("✅ Commit message 已生成")
-            # Store the generated message for commit/push actions
-            full_msg = f"{msg.get('type', 'chore')}({msg.get('scope', '')}): {msg.get('message', msg.get('content', str(msg)))}"
-            body = msg.get("body", "")
-            if body:
-                full_msg += f"\n\n{body}"
-            self._last_commit_msg = full_msg
             self._show_actions(self.commit_actions)
         except Exception as e:
             self._show_error(self.commit_output, e)
@@ -812,13 +1068,13 @@ class AIAgentGUI:
         if not self._last_commit_msg:
             messagebox.showwarning("提示", "请先生成 Commit Message")
             return
+        repo = self._check_repo()
+        if not repo: return
         if not messagebox.askyesno("确认提交", f"将执行:\n\ngit add -A\ngit commit -m \"{self._last_commit_msg[:80]}...\"\n\n确认提交?"):
             return
 
-        from pathlib import Path
         from tools.git_commit import git_add, git_commit_exec
-        repo = Path(self.repo_path_var.get()).resolve()
-        ok, out = git_add(str(repo))
+        ok, out = git_add(repo)
         if not ok:
             messagebox.showerror("提交失败", f"git add 失败:\n{out}")
             return
@@ -835,11 +1091,11 @@ class AIAgentGUI:
             messagebox.showwarning("提示", "请先生成 Commit Message")
             return
 
-        from pathlib import Path
         from tools.git_commit import git_add, git_commit_exec, git_push, git_get_remote
 
-        repo = Path(self.repo_path_var.get()).resolve()
-        remote = git_get_remote(str(repo))
+        repo = self._check_repo()
+        if not repo: return
+        remote = git_get_remote(repo)
 
         if not remote:
             messagebox.showerror("推送失败", "未找到 GitHub 远程仓库 (origin)。\n请先设置: git remote add origin <url>")
@@ -897,11 +1153,22 @@ class AIAgentGUI:
         self.root.after(0, _do)
 
     def _save_generated_code(self):
-        """Save the last generated code to a file, with folder support."""
-        if not self._last_generated_code:
-            messagebox.showwarning("提示", "请先生成代码")
+        """Save the current editor code, using input text as filename."""
+        code = self._get_code_from_editor()
+        if not code:
+            messagebox.showwarning("提示", "请先生成代码或编写代码")
             return
-        # Default to ./generated/ under repo path
+        # Generate filename from input description
+        import re
+        raw = self.code_input.get("1.0", tk.END).strip()
+        # Clean: keep Chinese/English/digits/underscore, remove punctuation
+        clean = re.sub(r'[^\w一-鿿]', '_', raw)
+        clean = re.sub(r'_+', '_', clean).strip('_')  # collapse multiple underscores
+        if clean:
+            filename = clean[:40] + ".py"
+        else:
+            filename = "generated_code.py"
+
         from pathlib import Path
         default_dir = Path(self.repo_path_var.get()).resolve() / "generated"
         default_dir.mkdir(parents=True, exist_ok=True)
@@ -909,17 +1176,18 @@ class AIAgentGUI:
             defaultextension=".py",
             filetypes=[("Python files", "*.py"), ("All files", "*.*")],
             initialdir=str(default_dir),
-            initialfile="generated_code.py",
+            initialfile=filename,
         )
         if path:
-            Path(path).write_text(self._last_generated_code, encoding="utf-8")
+            Path(path).write_text(code, encoding="utf-8")
             self._set_status(f"💾 代码已保存到: {path}")
 
     def _jump_gen_to_review(self):
-        """After code gen → jump to review tab with the generated code."""
-        if self._last_generated_code:
+        """Jump to review tab with the current editor code."""
+        code = self._get_code_from_editor()
+        if code:
             self.review_input.delete("1.0", tk.END)
-            self.review_input.insert("1.0", self._last_generated_code)
+            self.review_input.insert("1.0", code)
         self._jump_to_tab(1)  # review is tab index 1
 
     def _jump_to_test_with_code(self):
@@ -933,6 +1201,153 @@ class AIAgentGUI:
     def _jump_to_commit(self):
         """Jump to commit tab."""
         self._jump_to_tab(3)  # commit is tab index 3
+
+    # ═══════════════════════════════════════════════
+    # Tab 5: 文本编辑器
+    # ═══════════════════════════════════════════════
+    def _build_editor_tab(self):
+        tab = ttk.Frame(self.notebook, padding=12)
+        self.notebook.add(tab, text="  📄 文本编辑器  ")
+
+        # Toolbar
+        toolbar = ttk.Frame(tab)
+        toolbar.pack(fill=tk.X, pady=(0, 5))
+        ttk.Button(toolbar, text="📂 打开", command=self._editor_open).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="💾 保存", command=self._editor_save).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="📋 另存为", command=self._editor_save_as).pack(side=tk.LEFT, padx=2)
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
+        self._editor_path_var = tk.StringVar(value="未打开文件")
+        self._editor_path_label = ttk.Label(toolbar, textvariable=self._editor_path_var,
+                                             font=("Consolas", 9), foreground="#999")
+        self._editor_path_label.pack(side=tk.LEFT, padx=5)
+        self._editor_modified = tk.StringVar(value="")
+        ttk.Label(toolbar, textvariable=self._editor_modified, foreground="#e0a000",
+                  font=("Consolas", 8)).pack(side=tk.LEFT)
+
+        # Line numbers + editor
+        editor_frame = tk.Frame(tab)
+        editor_frame.pack(fill=tk.BOTH, expand=True)
+
+        self._editor_line_canvas = tk.Canvas(editor_frame, width=45, bg="#252526", highlightthickness=0)
+        self._editor_line_canvas.pack(side=tk.LEFT, fill=tk.Y)
+
+        self._editor_text = tk.Text(editor_frame, font=("Consolas", 11), relief=tk.FLAT,
+                                     bg="#1e1e1e", fg="#d4d4d4", insertbackground="white",
+                                     undo=True, wrap=tk.NONE)
+        editor_scroll_y = ttk.Scrollbar(editor_frame, orient=tk.VERTICAL,
+                                         command=self._editor_text.yview)
+        editor_scroll_x = ttk.Scrollbar(tab, orient=tk.HORIZONTAL,
+                                         command=self._editor_text.xview)
+        self._editor_text.configure(yscrollcommand=editor_scroll_y.set,
+                                     xscrollcommand=editor_scroll_x.set)
+        editor_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        self._editor_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        editor_scroll_x.pack(fill=tk.X)
+
+        self._editor_text.bind("<KeyRelease>", lambda e: self._editor_update_line_numbers())
+        self._editor_text.bind("<MouseWheel>", lambda e: self._editor_update_line_numbers())
+        self._editor_text.bind("<<Modified>>", self._editor_on_modify)
+        self._editor_file_path = None
+
+        # Keyboard shortcuts
+        self.root.bind("<Control-o>", lambda e: self._editor_open())
+        self.root.bind("<Control-s>", lambda e: self._editor_save())
+        self.root.bind("<Control-Shift-S>", lambda e: self._editor_save_as())
+
+        self._editor_update_line_numbers()
+
+        # Status
+        status = tk.Frame(tab, bg="#252526", height=22)
+        status.pack(fill=tk.X, side=tk.BOTTOM, pady=(5, 0))
+        self._editor_status = tk.Label(status, text="Ctrl+O 打开 | Ctrl+S 保存 | Ctrl+Shift+S 另存为",
+                                        font=("Consolas", 8), bg="#252526", fg="#999", anchor=tk.W)
+        self._editor_status.pack(side=tk.LEFT, padx=8, pady=2)
+        self._editor_cursor = tk.Label(status, text="行: 1  列: 1", font=("Consolas", 8),
+                                        bg="#252526", fg="#999", anchor=tk.E)
+        self._editor_cursor.pack(side=tk.RIGHT, padx=8, pady=2)
+        self._editor_text.bind("<KeyRelease>", self._editor_update_cursor, add="+")
+        self._editor_text.bind("<Button-1>", lambda e: self.root.after(100, self._editor_update_cursor))
+
+    def _editor_update_line_numbers(self):
+        """Redraw line numbers for the text editor."""
+        self._editor_line_canvas.delete("all")
+        code = self._editor_text.get("1.0", tk.END)
+        n = code.count("\n") + (0 if code.endswith("\n") else 1)
+        lh = 17
+        for i in range(1, n + 1):
+            y0 = (i - 1) * lh + 2
+            self._editor_line_canvas.create_text(33, y0 + lh/2, text=str(i), anchor=tk.E,
+                                                  fill="#888", font=("Consolas", 7))
+
+    def _editor_on_modify(self, event=None):
+        """Track modification state."""
+        if self._editor_text.edit_modified():
+            self._editor_modified.set("● 已修改")
+        self._editor_text.edit_modified(False)
+
+    def _editor_update_cursor(self, event=None):
+        """Update cursor position display."""
+        pos = self._editor_text.index(tk.INSERT)
+        line, col = pos.split(".")
+        self._editor_cursor.config(text=f"行: {line}  列: {int(col)+1}")
+
+    def _editor_open(self):
+        """Open a file in the editor."""
+        path = filedialog.askopenfilename(
+            title="打开文件",
+            filetypes=[("所有文件", "*.*"), ("文本文件", "*.txt"), ("Python", "*.py"),
+                       ("Markdown", "*.md"), ("JSON", "*.json"), ("HTML", "*.html")])
+        if not path: return
+        try:
+            from pathlib import Path
+            content = Path(path).read_text(encoding="utf-8")
+            self._editor_text.delete("1.0", tk.END)
+            self._editor_text.insert("1.0", content)
+            self._editor_file_path = path
+            self._editor_path_var.set(path)
+            self._editor_modified.set("")
+            self._editor_text.edit_modified(False)
+            self._editor_update_line_numbers()
+            self._set_status(f"📂 已打开: {path}")
+        except Exception as e:
+            messagebox.showerror("打开失败", f"无法打开文件:\n{e}")
+
+    def _editor_save(self):
+        """Save current file (Ctrl+S)."""
+        if self._editor_file_path:
+            try:
+                from pathlib import Path
+                content = self._editor_text.get("1.0", tk.END)
+                if content.endswith("\n"): content = content[:-1]
+                Path(self._editor_file_path).write_text(content, encoding="utf-8")
+                self._editor_modified.set("")
+                self._editor_text.edit_modified(False)
+                self._set_status(f"💾 已保存: {self._editor_file_path}")
+            except Exception as e:
+                messagebox.showerror("保存失败", f"无法保存文件:\n{e}")
+        else:
+            self._editor_save_as()
+
+    def _editor_save_as(self):
+        """Save as a new file."""
+        path = filedialog.asksaveasfilename(
+            title="另存为",
+            defaultextension=".txt",
+            filetypes=[("文本文件", "*.txt"), ("Python", "*.py"), ("Markdown", "*.md"),
+                       ("JSON", "*.json"), ("HTML", "*.html"), ("所有文件", "*.*")])
+        if not path: return
+        try:
+            from pathlib import Path
+            content = self._editor_text.get("1.0", tk.END)
+            if content.endswith("\n"): content = content[:-1]
+            Path(path).write_text(content, encoding="utf-8")
+            self._editor_file_path = path
+            self._editor_path_var.set(path)
+            self._editor_modified.set("")
+            self._editor_text.edit_modified(False)
+            self._set_status(f"💾 已保存: {path}")
+        except Exception as e:
+            messagebox.showerror("保存失败", f"无法保存文件:\n{e}")
 
     def _jump_to_review_with_test(self):
         """After test gen → jump to review the test code."""
