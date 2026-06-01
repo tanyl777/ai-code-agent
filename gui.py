@@ -459,6 +459,7 @@ class AIAgentGUI:
         ttk.Button(code_btn_frame, text="🐛 Debug", command=self._do_debug_code).pack(side=tk.LEFT, padx=3)
         ttk.Button(code_btn_frame, text="💾 保存", command=self._save_generated_code).pack(side=tk.LEFT, padx=3)
         ttk.Button(code_btn_frame, text="🔍 审查 →", command=self._jump_gen_to_review).pack(side=tk.LEFT, padx=3)
+        ttk.Button(code_btn_frame, text="🧪 测试 →", command=self._jump_gen_to_test).pack(side=tk.LEFT, padx=3)
         self.code_json_var = tk.BooleanVar()
         ttk.Checkbutton(code_btn_frame, text="JSON", variable=self.code_json_var).pack(side=tk.LEFT, padx=5)
         ttk.Button(code_btn_frame, text="清空", command=self._clear_code_tab).pack(side=tk.RIGHT, padx=3)
@@ -1190,6 +1191,14 @@ class AIAgentGUI:
             self.review_input.insert("1.0", code)
         self._jump_to_tab(1)  # review is tab index 1
 
+    def _jump_gen_to_test(self):
+        """Jump to test tab directly with generated code (skip review)."""
+        code = self._get_code_from_editor()
+        if code:
+            self.test_input.delete("1.0", tk.END)
+            self.test_input.insert("1.0", code)
+        self._jump_to_tab(2)  # test is tab index 2
+
     def _jump_to_test_with_code(self):
         """Jump to test tab with review input as source."""
         code = self.review_input.get("1.0", tk.END).strip()
@@ -1215,6 +1224,9 @@ class AIAgentGUI:
         ttk.Button(toolbar, text="📂 打开", command=self._editor_open).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="💾 保存", command=self._editor_save).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="📋 另存为", command=self._editor_save_as).pack(side=tk.LEFT, padx=2)
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
+        ttk.Button(toolbar, text="🔍 审查", command=self._editor_to_review).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="🧪 测试", command=self._editor_to_test).pack(side=tk.LEFT, padx=2)
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
         self._editor_path_var = tk.StringVar(value="未打开文件")
         self._editor_path_label = ttk.Label(toolbar, textvariable=self._editor_path_var,
@@ -1348,6 +1360,22 @@ class AIAgentGUI:
             self._set_status(f"💾 已保存: {path}")
         except Exception as e:
             messagebox.showerror("保存失败", f"无法保存文件:\n{e}")
+
+    def _editor_to_review(self):
+        """Send editor content to review tab."""
+        code = self._editor_text.get("1.0", tk.END).strip()
+        if code:
+            self.review_input.delete("1.0", tk.END)
+            self.review_input.insert("1.0", code)
+        self._jump_to_tab(1)
+
+    def _editor_to_test(self):
+        """Send editor content to test tab."""
+        code = self._editor_text.get("1.0", tk.END).strip()
+        if code:
+            self.test_input.delete("1.0", tk.END)
+            self.test_input.insert("1.0", code)
+        self._jump_to_tab(2)
 
     def _jump_to_review_with_test(self):
         """After test gen → jump to review the test code."""

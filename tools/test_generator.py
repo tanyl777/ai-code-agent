@@ -25,14 +25,49 @@ def _read_source(source: str) -> tuple[str, str]:
 
 def _extract_code(text: str) -> str:
     """Extract Python code from JSON response, markdown code blocks, or raw text."""
-    # Try JSON object with "code" key first
-    json_match = re.search(r'\{[^{}]*"code"\s*:\s*"((?:[^"\\]|\\.)*)"\s*[,}]', text, re.DOTALL)
-    if json_match:
-        code = json_match.group(1)
-        code = code.replace("\\n", "\n").replace("\\t", "\t").replace('\\"', '"')
-        return code.strip()
+    import json as _json
 
-    # Try markdown code blocks
+    # --- Step 1: Strip markdown fences ---
+    clean = text.strip()
+    if clean.startswith("```"):
+        clean = re.sub(r"^```(?:json)?\s*\n?", "", clean)
+        clean = re.sub(r"\n?```\s*$", "", clean)
+
+    # --- Step 2: Try parsing as JSON ---
+    try:
+        data = _json.loads(clean)
+        # Check all possible code keys
+        for key in ("corrected_test_code", "corrected_test", "code", "content"):
+            if key in data and isinstance(data[key], str):
+                return data[key].strip()
+    except (_json.JSONDecodeError, TypeError):
+        pass
+
+    # --- Step 3: Regex fallback for non-standard JSON (handles nested braces) ---
+    for key in ("corrected_test_code", "corrected_test", "code"):
+        # Extract JSON object containing the key using brace counting
+        start = text.find(f'"{key}"')
+        if start >= 0:
+            # Find the enclosing { } using brace counting
+            obj_start = text.rfind("{", 0, start)
+            if obj_start >= 0:
+                depth = 0
+                obj_end = obj_start
+                for i in range(obj_start, len(text)):
+                    if text[i] == "{": depth += 1
+                    elif text[i] == "}":
+                        depth -= 1
+                        if depth == 0:
+                            obj_end = i + 1
+                            break
+                try:
+                    data = _json.loads(text[obj_start:obj_end])
+                    if key in data and isinstance(data[key], str):
+                        return data[key].strip()
+                except (_json.JSONDecodeError, TypeError):
+                    pass
+
+    # --- Step 4: Markdown code blocks ---
     match = re.search(r"```(?:python)?\s*\n(.*?)```", text, re.DOTALL)
     if match:
         return match.group(1).strip()
