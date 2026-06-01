@@ -74,6 +74,37 @@ COMMIT_TEMPLATE = """根据以下 git diff 生成符合 Conventional Commits 规
 
 只输出 JSON。"""
 
+TEST_GEN_TEMPLATE = """为以下 Python 代码生成 pytest 单元测试：
+
+```python
+{source_code}
+```
+
+要求：
+- 使用 pytest 框架（import pytest）
+- 覆盖所有公开函数/方法的：
+  1. 基础功能（正常输入 → 期望输出）
+  2. 边界条件（空输入、单元素、极大/极小值）
+  3. 异常情况（无效参数、类型错误）
+- 使用 @pytest.mark.parametrize 减少重复
+- 每个测试函数名以 test_ 开头
+- 测试应该是独立的，不依赖外部资源
+- 包含必要的 fixtures 和 conftest 设置
+
+只输出 JSON，code 字段包含完整可运行的测试文件。"""
+
+TEST_FIX_TEMPLATE = """之前生成的测试代码执行失败：
+
+测试代码：
+```python
+{test_code}
+```
+
+错误信息：
+{error}
+
+请分析测试失败原因（是测试写错了还是被测代码有问题）并生成修正后的测试。只输出 JSON。"""
+
 FIX_TEMPLATE = """之前的代码执行时出现以下错误：
 
 代码：

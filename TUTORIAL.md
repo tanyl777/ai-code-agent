@@ -9,9 +9,10 @@
 3. [架构深度解析](#3-架构深度解析)
 4. [核心模块逐行解读](#4-核心模块逐行解读)
 5. [关键设计决策——为什么这样做](#5-关键设计决策为什么这样做)
-6. [LangChain 1.x Agent 原理](#6-langchain-1x-agent-原理)
-7. [面试高频问题与回答思路](#7-面试高频问题与回答思路)
-8. [扩展方向](#8-扩展方向)
+6. [为什么做这个项目——竞品对比与核心动机](#6-为什么做这个项目竞品对比与核心动机)
+7. [LangChain 1.x Agent 原理](#7-langchain-1x-agent-原理)
+8. [面试高频问题与回答思路](#8-面试高频问题与回答思路)
+9. [扩展方向](#9-扩展方向)
 
 ---
 
@@ -484,9 +485,163 @@ result = subprocess.run(["pylint", file], capture_output=True)
 
 ---
 
-## 6. LangChain 1.x Agent 原理
+## 6. 为什么做这个项目——竞品对比与核心动机
 
-### 6.1 `create_agent` 内部做了什么？
+> 面试必答题："你为什么做这个项目？市面上不是已经有 GitHub Copilot、Cursor 了吗？"
+
+### 6.1 同类产品能力矩阵
+
+| 产品 | 代码生成 | 代码审查 | Commit 生成 | 可定制规则 | 私有部署 | Agent 架构 |
+|------|:--:|:--:|:--:|:--:|:--:|:--:|
+| **GitHub Copilot** | ✅ IDE 补全 | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Cursor** | ✅ IDE 内 | ❌ 基础 | ❌ | ❌ | ❌ | ❌ |
+| **Claude Code** | ✅ CLI | ✅ 基础 | ❌ | ❌ | ❌ | ✅ |
+| **CodeRabbit** | ❌ | ✅ PR 审查 | ❌ | 部分 | ❌ | ❌ |
+| **CodeReview Bots** | ❌ | ✅ CI 集成 | ❌ | 有限 | 部分 | ❌ |
+| **commitlint / commitizen** | ❌ | ❌ | ✅ 规范检查 | ✅ | ✅ | ❌ |
+| **本项目** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+### 6.2 现有工具的四个核心局限
+
+**局限 1：功能割裂——单一职责**
+
+现有工具每个只做一件事：
+- Copilot 只管补全 → 你需要切出去用 CodeRabbit 审查 → 再打开 commitizen 写提交信息
+- 三个工具三种输出格式，无法联动，无法共享上下文
+
+本项目的解决方式：**一个 Agent，三种能力，同一套上下文**。代码生成本身就可以被 static_reviewer 自动审查，审查结果又可以辅助生成更准确的 commit message。
+
+**局限 2：无法定制——黑盒大模型**
+
+```
+Copilot / Cursor 的工作方式：
+  IDE 插件 → 微软/Anthropic 的固定 Prompt → 返回代码
+
+你能控制的：
+  ✅ 接受 / 拒绝建议
+  ❌ 修改 System Prompt
+  ❌ 定制审查规则
+  ❌ 添加团队编码规范
+  ❌ 调整 few-shot 示例
+```
+
+本项目你可以：
+- 修改 `prompts/templates.py` 注入**团队特定编码规范**（如"禁止使用闭包"、"所有函数必须有 docstring"）
+- 修改 `prompts/examples.py` 加入**团队代码风格示例**
+- 调整 `config.py` 的 `review_max_complexity`、`max_retries` 等参数
+- 在 `tools/static_reviewer.py` 中添加**自定义检查规则**
+
+**局限 3：无法集成——独立工具**
+
+Copilot 是 IDE 插件，CodeRabbit 是 GitHub App，commitlint 是 CLI 工具。它们**无法在同一个工作流中传递信息**。
+
+本项目的集成能力：
+```bash
+# CI/CD 管道中统一调用
+python cli.py review src/ --json | python ci-report.py
+python cli.py commit . --json | gh pr comment -
+
+# 审查结果可以反馈给代码生成器做改进
+# commit message 基于同一套 diff 分析，上下文一致
+```
+
+**局限 4：数据主权——代码外泄风险**
+
+Copilot、Cursor、CodeRabbit 都将**你的代码发送到第三方服务器**：
+- 金融、军工、医疗行业 → 合规红线
+- 开源项目核心模块 → 泄露未公开的 0day
+- 私有部署 → 需要企业版授权，价格高
+
+本项目的架构天然支持**私有化部署**：
+```python
+# 换成本地模型只需改一行
+llm = ChatAnthropic(...)           # 云端 Claude
+# 改为
+llm = ChatOllama(model="qwen3")    # 本地 Ollama 模型
+# 或
+llm = ChatOpenAI(base_url="http://internal-llm:8080")  # 内网 API
+```
+
+### 6.3 做这个项目的四个真实动机
+
+**动机 1：学习 Agent 架构的设计闭环**
+
+这个项目是理解 **LLM 应用架构** 的完整切面：
+
+```
+只用 Copilot → 你不知道 Agent 怎么工作的
+只用 API    → 你不知道 Tool 怎么编排的
+只用 LangChain → 你不知道 AST 怎么审查代码的
+
+做这个项目 → 你掌握了从 LLM 调用到 Agent 编排到工具实现的完整链路
+```
+
+**动机 2：团队需要统一的代码质量门禁**
+
+一个真实的团队场景：
+
+```
+需求 → 写代码 → 提交 PR → 人工 Code Review → 合并
+
+痛点：
+- 人工 Review 占用 Senior 大量时间
+- Review 标准不一致（不同 Reviewer 关注点不同）
+- 低级错误（裸 except、可变默认参数）反复出现
+
+自动化方案：
+  git push → 触发 CI → python cli.py review changed_files.py
+  → 不通过则 PR 自动挂起 → 通过后才进入人工 Review
+
+效果：
+- Senior 只需关注架构和业务逻辑，不再检查格式和基础 Bug
+- 所有 PR 经过同样的检查标准，零人工误差
+```
+
+**动机 3：Prompt 工程的最佳实践——Few-shot 比微调更适合快速迭代**
+
+在真实业务中，需求变化快，微调模型周期太长。Few-shot 的即时反馈循环：
+
+```
+发现新 Bug 模式 → 5 分钟加一个 few-shot 示例 → 立即生效
+vs
+发现新 Bug 模式 → 标注 500+ 样本 → 训练 4 小时 → 部署模型
+```
+
+**动机 4：技术面试的工程证明**
+
+这个项目在简历上能证明的能力矩阵：
+
+| 能力维度 | 代码中的体现 |
+|----------|-------------|
+| LLM 应用开发 | `agent.py` Agent 编排 + Checkpointer 记忆 |
+| Prompt 工程 | `prompts/` System Prompt + 9 个分层 Few-shot |
+| 工具集成 | `tools/` 3 个 `@tool` 装饰器工具 |
+| 安全设计 | `code_interpreter.py` 白名单沙箱 |
+| Python 底层能力 | `static_reviewer.py` AST 递归分析 |
+| CLI 工程 | `cli.py` argparse 子命令 + JSON 输出 |
+| Git 原理 | `git_commit.py` subprocess diff 分析 |
+
+### 6.4 与 Claude Code 的直接对比
+
+特别值得回答的一个问题是：**"Claude Code 本身就能做这些，你为什么要自己实现？"**
+
+| | Claude Code | 本项目 |
+|---|---|---|
+| 定位 | 通用 AI 编程助手 | **可定制的专用 Agent** |
+| Prompt 控制 | 仅 /commands 和 CLAUDE.md | **完全控制 System Prompt 和 Few-shot** |
+| 审查规则 | 无固定规则 | **AST 确定性规则引擎（可复现）** |
+| Commit 格式 | 自由格式 | **强制 Conventional Commits** |
+| 集成 | 仅 CLI 交互 | **JSON 输出 → 任意 CI/CD** |
+| 记忆机制 | 黑盒 | **透明的 SQLite + thread_id 隔离** |
+| 学习价值 | 使用工具 | **理解工具的原理** |
+
+一句话总结：**Claude Code 是开箱即用的产品，本项目是让你理解 Agent 如何工作的教学型和可定制型系统**。就像你既要会用 VS Code，也要理解编译器原理——后者才是面试中被考察的核心能力。
+
+---
+
+## 7. LangChain 1.x Agent 原理
+
+### 7.1 `create_agent` 内部做了什么？
 
 ```python
 from langchain.agents import create_agent
@@ -518,7 +673,7 @@ LangChain 1.x 的 `create_agent` 封装了一个 **ReAct Agent**（Reasoning + A
 └─────────────────────────────────────────┘
 ```
 
-### 6.2 ReAct 循环
+### 7.2 ReAct 循环
 
 ```
 1. 用户输入 → State.messages.append(HumanMessage)
@@ -529,7 +684,7 @@ LangChain 1.x 的 `create_agent` 封装了一个 **ReAct Agent**（Reasoning + A
 6. Checkpointer 保存完整 messages 到 SQLite
 ```
 
-### 6.3 `@tool` 装饰器的作用
+### 7.3 `@tool` 装饰器的作用
 
 ```python
 from langchain_core.tools import tool
@@ -545,7 +700,7 @@ def code_interpreter(user_request: str) -> str:
 # 3. 让 LLM 知道："有这么一个工具，它的功能是 XXX，参数是 YYY"
 ```
 
-### 6.4 Checkpointer 工作原理
+### 7.4 Checkpointer 工作原理
 
 ```python
 # 每个 thread_id 在 SQLite 中存储独立的 messages 历史
@@ -560,7 +715,7 @@ agent.invoke(
 
 ---
 
-## 7. 面试高频问题与回答思路
+## 8. 面试高频问题与回答思路
 
 ### Q1: 请介绍你这个项目的整体架构
 
@@ -651,7 +806,7 @@ agent.invoke(
 
 ---
 
-## 8. 扩展方向
+## 9. 扩展方向
 
 ### 8.1 快速添加新 Tool
 

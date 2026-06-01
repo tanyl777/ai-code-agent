@@ -25,6 +25,7 @@ from memory.session_memory import SessionMemory
 from tools.code_interpreter import generate_and_run
 from tools.static_reviewer import review_code
 from tools.git_commit import _get_diffs, _generate_commit_message, _get_changed_files, _get_branch
+from tools.test_generator import generate_and_test as generate_tests
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -122,6 +123,36 @@ def cmd_commit(args: argparse.Namespace) -> None:
     print("\n💡 如满意，执行: git commit -m \"...\"")
 
 
+def cmd_test(args: argparse.Namespace) -> None:
+    """Handle 'test' subcommand — generate pytest unit tests for source code."""
+    from pathlib import Path
+    from agent import get_llm
+
+    llm = get_llm()
+    result = generate_tests(args.source, llm, max_retries=args.max_retries)
+
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
+    if result["status"] == "success":
+        print(f"✅ 测试生成成功（第 {result['metadata']['attempts']} 次尝试）\n")
+        print(f"📁 源文件: {result['file']}")
+        print(f"🧪 {result['metadata']['test_output']}\n")
+        if args.output:
+            Path(args.output).write_text(result["content"], encoding="utf-8")
+            print(f"💾 测试代码已写入: {args.output}")
+        else:
+            print(result["content"])
+    else:
+        print(f"❌ 测试生成失败（已尝试 {result['metadata']['attempts']} 次修正）\n")
+        print(f"📁 源文件: {result['file']}")
+        print(f"🧪 {result['metadata'].get('test_output', '无')}")
+        err = result['metadata'].get('test_stderr', '')
+        if err:
+            print(f"\n--- 错误详情 ---\n{err}")
+
+
 def cmd_chat(args: argparse.Namespace) -> None:
     """Handle 'chat' subcommand — interactive multi-turn conversation."""
     import uuid
@@ -179,38 +210,76 @@ def cmd_chat(args: argparse.Namespace) -> None:
         print()
 
 
+def cmd_cache(args: argparse.Namespace) -> None:
+    """Handle 'cache' subcommand — show or clear the LLM response cache."""
+    from agent import cache_stats, clear_cache
+
+    if args.clear:
+        n = clear_cache(older_than=args.older_than)
+        print(f"🧹 已清除 {n} 条缓存")
+    else:
+        stats = cache_stats()
+        print(f"📦 LLM 响应缓存:")
+        print(f"   条目数: {stats['entries']}")
+        print(f"   大小:   {stats['size_kb']} KB")
+        print(f"   目录:   {stats['directory']}")
+        if stats['entries'] > 0:
+            print(f"\n💡 执行 'python cli.py cache --clear' 清空缓存")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="AI 编程助手 Agent — 基于 LangChain + Claude API",
+        description="AI 编程助手 Agent — 基于 LangChain ReAct + Claude/DeepSeek API",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
+        epilog="示例:\n"
+               "  python cli.py run \"实现二分查找\"\n"
+               "  python cli.py review app.py\n"
+               "  python cli.py test src/utils.py\n"
+               "  python cli.py commit .\n"
+               "  python cli.py chat\n"
+               "  python cli.py cache",
     )
+    parser.add_argument("--verbose", "-v", action="store_true", help="详细输出（调试用）")
     subparsers = parser.add_subparsers(dest="command", help="可用命令")
 
     # run
-    p_run = subparsers.add_parser("run", help="自然语言 → 代码生成 + 执行")
+    p_run = subparsers.add_parser("run", help="💻 自然语言 → 代码生成 + 沙箱执行 + 自动修正")
     p_run.add_argument("request", help="用自然语言描述的功能需求")
     p_run.add_argument("--json", action="store_true", help="以 JSON 格式输出")
     p_run.set_defaults(func=cmd_run)
 
     # review
-    p_review = subparsers.add_parser("review", help="静态代码审查")
+    p_review = subparsers.add_parser("review", help="🔍 AST 静态代码审查 (PEP8/命名/复杂度/Bug/导入)")
     p_review.add_argument("source", help="Python 文件路径 或 代码字符串")
     p_review.add_argument("--max-complexity", type=int, default=10, help="圈复杂度阈值 (默认: 10)")
     p_review.add_argument("--json", action="store_true", help="以 JSON 格式输出")
     p_review.set_defaults(func=cmd_review)
 
+    # test
+    p_test = subparsers.add_parser("test", help="🧪 为 Python 代码生成 pytest 单元测试 + 自动验证")
+    p_test.add_argument("source", help="Python 文件路径 或 代码字符串")
+    p_test.add_argument("--max-retries", type=int, default=2, help="测试失败时最大修正次数 (默认: 2)")
+    p_test.add_argument("--output", "-o", default=None, help="将生成的测试代码写入指定文件")
+    p_test.add_argument("--json", action="store_true", help="以 JSON 格式输出")
+    p_test.set_defaults(func=cmd_test)
+
     # commit
-    p_commit = subparsers.add_parser("commit", help="生成 Conventional Commits 提交信息")
+    p_commit = subparsers.add_parser("commit", help="📝 分析 git diff → Conventional Commits 提交信息")
     p_commit.add_argument("repo", nargs="?", default=".", help="Git 仓库路径 (默认: 当前目录)")
     p_commit.add_argument("--json", action="store_true", help="以 JSON 格式输出")
     p_commit.set_defaults(func=cmd_commit)
 
     # chat
-    p_chat = subparsers.add_parser("chat", help="交互式多轮对话")
-    p_chat.add_argument("--model", default=None, help="Claude 模型名称 (默认: claude-sonnet-4-6)")
-    p_chat.add_argument("--api-key", default=None, help="Anthropic API Key (默认: 环境变量 ANTHROPIC_API_KEY)")
+    p_chat = subparsers.add_parser("chat", help="💬 交互式多轮对话 (带持久记忆)")
+    p_chat.add_argument("--model", default=None, help="模型名称")
+    p_chat.add_argument("--api-key", default=None, help="API Key (默认: 环境变量)")
     p_chat.set_defaults(func=cmd_chat)
+
+    # cache
+    p_cache = subparsers.add_parser("cache", help="📦 查看/清空 LLM 响应缓存")
+    p_cache.add_argument("--clear", action="store_true", help="清空缓存")
+    p_cache.add_argument("--older-than", type=int, default=0, help="仅清除 N 秒前的缓存")
+    p_cache.set_defaults(func=cmd_cache)
 
     args = parser.parse_args()
 

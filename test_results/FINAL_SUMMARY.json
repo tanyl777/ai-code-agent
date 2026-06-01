@@ -1,0 +1,57 @@
+{
+  "test_results": [
+    [
+      "01_binary_search",
+      "FAIL",
+      "rc=2"
+    ],
+    [
+      "02_stack_class",
+      "PASS",
+      ""
+    ],
+    [
+      "03_csv_to_json",
+      "FAIL",
+      "rc=1"
+    ],
+    [
+      "04_tree_traversal",
+      "FAIL",
+      "rc=1"
+    ],
+    [
+      "05_safe_reader",
+      "FAIL",
+      "rc=1"
+    ]
+  ],
+  "pass_rate": "1/5",
+  "review_summary": {
+    "01_binary_search": {
+      "total_issues": 0,
+      "errors": 0,
+      "warnings": 0
+    },
+    "02_stack_class": {
+      "total_issues": 0,
+      "errors": 0,
+      "warnings": 0
+    },
+    "03_csv_to_json": {
+      "total_issues": 0,
+      "errors": 0,
+      "warnings": 0
+    },
+    "04_tree_traversal": {
+      "total_issues": 0,
+      "errors": 0,
+      "warnings": 0
+    },
+    "05_safe_reader": {
+      "total_issues": 0,
+      "errors": 0,
+      "warnings": 0
+    }
+  }
+}

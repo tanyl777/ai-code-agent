@@ -1,9 +1,11 @@
 """Code Interpreter Tool — NL → code generation + sandboxed execution + auto-fix."""
 
 import io
+import json
 import re
 import sys
 import traceback
+from builtins import __build_class__, __import__
 from typing import Any
 
 from langchain_core.tools import tool
@@ -11,7 +13,27 @@ from langchain_core.tools import tool
 from prompts.examples import CODE_GEN_EXAMPLES
 from prompts.templates import CODE_GEN_TEMPLATE, FIX_TEMPLATE
 
+# ═══════════════════════════════════════════════════════════════
+# Sandbox Security Model
+# ═══════════════════════════════════════════════════════════════
+# ALLOWED (safe operations needed for normal Python code):
+#   - Module imports (__import__) → typing, collections, etc.
+#   - Class definitions (__build_class__) → OOP patterns
+#   - All standard builtin functions (abs, len, range, etc.)
+#   - All standard exception types
+#   - super(), property(), staticmethod(), classmethod()
+#
+# BLOCKED (dangerous operations — excluded from SAFE_BUILTINS):
+#   - open()      → file system access
+#   - eval()      → arbitrary code execution
+#   - exec()      → arbitrary code execution
+#   - compile()   → code compilation
+#   - __import__ was originally blocked,
+#     but added back to allow typing/collections imports
+# ═══════════════════════════════════════════════════════════════
+
 SAFE_BUILTINS = {
+    # --- 安全的内置函数 ---
     "abs": abs, "all": all, "any": any, "ascii": ascii,
     "bin": bin, "bool": bool, "bytes": bytes, "chr": chr,
     "complex": complex, "dict": dict, "divmod": divmod,
@@ -24,30 +46,103 @@ SAFE_BUILTINS = {
     "pow": pow, "print": print, "range": range, "repr": repr,
     "reversed": reversed, "round": round, "set": set, "slice": slice,
     "sorted": sorted, "str": str, "sum": sum, "tuple": tuple,
-    "type": type, "zip": zip, "Exception": Exception,
-    "ValueError": ValueError, "TypeError": TypeError,
+    "type": type, "zip": zip,
+    # --- 允许模块导入和类定义 ---
+    "__import__": __import__,
+    "__build_class__": __build_class__,
+    # --- OOP 支持 ---
+    "super": super, "property": property,
+    "staticmethod": staticmethod, "classmethod": classmethod,
+    # --- 常用异常类 ---
+    "Exception": Exception, "ValueError": ValueError, "TypeError": TypeError,
     "KeyError": KeyError, "IndexError": IndexError,
     "StopIteration": StopIteration, "AssertionError": AssertionError,
     "ImportError": ImportError, "AttributeError": AttributeError,
     "ZeroDivisionError": ZeroDivisionError,
+    "RuntimeError": RuntimeError, "NotImplementedError": NotImplementedError,
+    "OSError": OSError, "FileNotFoundError": FileNotFoundError,
+    "PermissionError": PermissionError, "IsADirectoryError": IsADirectoryError,
+    "FileExistsError": FileExistsError, "EOFError": EOFError,
 }
 
 
+# All known JSON key names LLMs use for code output
+_CODE_KEYS = (
+    "code", "corrected_code", "corrected_test_code",
+    "fixed_code", "fixed_test_code",
+)
+
+
 def _extract_code(text: str) -> str:
-    """Extract Python code from JSON response, markdown code blocks, or raw text."""
-    # Try JSON object with "code" key first (DeepSeek/v4 output format)
-    json_match = re.search(r'\{[^{}]*"code"\s*:\s*"((?:[^"\\]|\\.)*)"\s*[,}]', text, re.DOTALL)
-    if json_match:
-        code = json_match.group(1)
-        # Unescape JSON-escaped newlines and quotes
-        code = code.replace("\\n", "\n").replace("\\t", "\t").replace('\\"', '"')
-        return code.strip()
+    """Extract Python code from LLM response in any format.
 
-    # Try markdown code blocks
-    match = re.search(r"```(?:python)?\s*\n(.*?)```", text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
+    Handles:
+    - Valid JSON with code/corrected_code/fixed_code keys
+    - Truncated JSON (DeepSeek/Claude output cut off)
+    - Trailing-backslash-before-newline formatting errors
+    - Markdown code blocks
+    - Raw code text
+    """
+    clean = text.strip()
 
+    # Strip markdown code fences
+    if clean.startswith("```"):
+        clean = re.sub(r"^```(?:json|python)?\s*\n?", "", clean)
+        clean = re.sub(r"\n?```\s*$", "", clean)
+
+    # ── Method 1: Parse as valid JSON ──
+    try:
+        data = json.loads(clean)
+        for key in _CODE_KEYS:
+            if key in data and isinstance(data[key], str) and len(data[key]) > 30:
+                return data[key].strip()
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # ── Method 2: Fix trailing backslash-newline and retry ──
+    try:
+        fixed = re.sub(r"\\\s*\n\s*", "", clean)
+        data = json.loads(fixed)
+        for key in _CODE_KEYS:
+            if key in data and isinstance(data[key], str) and len(data[key]) > 30:
+                return data[key].strip()
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # ── Method 3: Regex — extract code from malformed/truncated JSON ──
+    # This handles cases where the JSON is valid enough to find a code key
+    # but invalid overall (truncated, trailing backslash, missing closing brace)
+    for key in _CODE_KEYS:
+        # Match: "key": "..."  capturing the string value
+        # Use greedy .* to capture even truncated content (missing closing quote)
+        m = re.search(
+            r'"' + re.escape(key) + r'"\s*:\s*"(.*?)(?:"\s*[,}]|\s*\}$|\Z)',
+            clean, re.DOTALL,
+        )
+        if m:
+            code = m.group(1)
+            code = code.replace("\\n", "\n").replace("\\t", "\t").replace('\\"', '"')
+            if len(code) > 30:
+                return code.strip()
+
+    # ── Method 4: Aggressive regex for truncated JSON ──
+    # When the JSON is cut off mid-value, grab everything after the key
+    for key in _CODE_KEYS:
+        m = re.search(r'"' + re.escape(key) + r'"\s*:\s*"(.*)', clean, re.DOTALL)
+        if m:
+            code = m.group(1)
+            # Strip trailing garbage (backslash, partial content)
+            code = re.sub(r'\\?\s*$', '', code)
+            code = code.replace("\\n", "\n").replace("\\t", "\t").replace('\\"', '"')
+            if len(code) > 30:
+                return code.strip()
+
+    # ── Method 5: Markdown code blocks ──
+    m = re.search(r"```(?:python)?\s*\n(.*?)```", text, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+
+    # ── Method 6: Raw text (last resort) ──
     return text.strip()
 
 

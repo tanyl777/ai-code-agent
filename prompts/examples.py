@@ -251,6 +251,207 @@ class myclass:
 }
 
 # ============================================================
+# Test Generation Examples
+# ============================================================
+
+TEST_GEN_EASY = {
+    "source_code": '''def is_palindrome(s: str) -> bool:
+    """Return True if s is a palindrome, ignoring case and non-alphanumeric chars."""
+    cleaned = "".join(c.lower() for c in s if c.isalnum())
+    return cleaned == cleaned[::-1]''',
+    "output": {
+        "type": "test",
+        "status": "success",
+        "content": '''import pytest
+from palindrome import is_palindrome
+
+
+@pytest.mark.parametrize(
+    "input_str,expected",
+    [
+        ("racecar", True),
+        ("A man, a plan, a canal: Panama", True),
+        ("hello", False),
+        ("", True),          # 空字符串视为回文
+        ("a", True),         # 单个字符
+        ("ab", False),
+        ("  ", True),        # 仅空白字符
+    ],
+)
+def test_is_palindrome(input_str: str, expected: bool):
+    assert is_palindrome(input_str) == expected
+
+
+def test_is_palindrome_with_numbers():
+    """数字和字母混合."""
+    assert is_palindrome("a1b2b1a") == True
+    assert is_palindrome("123") == False''',
+        "metadata": {"test_count": 9, "categories": ["基础功能", "边界条件", "混合输入"]},
+    },
+}
+
+TEST_GEN_MEDIUM = {
+    "source_code": '''from collections import OrderedDict
+
+
+class LRUCache:
+    """Least Recently Used cache with O(1) get and put."""
+
+    def __init__(self, capacity: int):
+        if capacity <= 0:
+            raise ValueError("capacity must be positive")
+        self.capacity = capacity
+        self.cache: OrderedDict[int, int] = OrderedDict()
+
+    def get(self, key: int) -> int:
+        if key not in self.cache:
+            return -1
+        self.cache.move_to_end(key)
+        return self.cache[key]
+
+    def put(self, key: int, value: int) -> None:
+        if key in self.cache:
+            self.cache.move_to_end(key)
+        self.cache[key] = value
+        if len(self.cache) > self.capacity:
+            self.cache.popitem(last=False)''',
+    "output": {
+        "type": "test",
+        "status": "success",
+        "content": '''import pytest
+from lru_cache import LRUCache
+
+
+class TestLRUCache:
+    """LRUCache 单元测试套件."""
+
+    def test_basic_put_and_get(self):
+        cache = LRUCache(2)
+        cache.put(1, 1)
+        assert cache.get(1) == 1
+        assert cache.get(2) == -1
+
+    def test_eviction_when_full(self):
+        cache = LRUCache(2)
+        cache.put(1, 1)
+        cache.put(2, 2)
+        cache.put(3, 3)  # 1 被淘汰
+        assert cache.get(1) == -1
+        assert cache.get(2) == 2
+        assert cache.get(3) == 3
+
+    def test_lru_order_update_on_get(self):
+        cache = LRUCache(2)
+        cache.put(1, 1)
+        cache.put(2, 2)
+        cache.get(1)     # 1 变为最近使用
+        cache.put(3, 3)  # 2 被淘汰
+        assert cache.get(1) == 1
+        assert cache.get(2) == -1
+        assert cache.get(3) == 3
+
+    def test_update_existing_key(self):
+        cache = LRUCache(2)
+        cache.put(1, 1)
+        cache.put(1, 10)
+        assert cache.get(1) == 10
+
+    @pytest.mark.parametrize("capacity", [0, -1, -5])
+    def test_invalid_capacity_raises(self, capacity: int):
+        with pytest.raises(ValueError, match="positive"):
+            LRUCache(capacity)
+
+    def test_capacity_one(self):
+        cache = LRUCache(1)
+        cache.put(1, 1)
+        cache.put(2, 2)
+        assert cache.get(1) == -1
+        assert cache.get(2) == 2''',
+        "metadata": {"test_count": 12, "categories": ["基础功能", "LRU淘汰", "异常", "边界(容量=1)"]},
+    },
+}
+
+TEST_GEN_HARD = {
+    "source_code": '''from typing import Any
+
+
+def sum_nested_integers(data: Any) -> int:
+    """Recursively sum all integers in a nested structure of lists and dicts.
+
+    Non-integer values and dict keys are ignored.
+    """
+    total = 0
+    if isinstance(data, int) and not isinstance(data, bool):
+        total += data
+    elif isinstance(data, list):
+        for item in data:
+            total += sum_nested_integers(item)
+    elif isinstance(data, dict):
+        for value in data.values():
+            total += sum_nested_integers(value)
+    return total''',
+    "output": {
+        "type": "test",
+        "status": "success",
+        "content": '''import pytest
+from nested_sum import sum_nested_integers
+
+
+class TestSumNestedIntegers:
+    """嵌套整数求和 — 覆盖递归、混合类型、深度嵌套."""
+
+    # ---- 基础功能 ----
+    def test_flat_list(self):
+        assert sum_nested_integers([1, 2, 3]) == 6
+
+    def test_nested_dict(self):
+        data = {"a": 1, "b": {"c": 2, "d": 3}}
+        assert sum_nested_integers(data) == 6
+
+    def test_mixed_list_and_dict(self):
+        data = {"a": [1, 2, {"b": 3}], "c": [4, [5, 6]]}
+        assert sum_nested_integers(data) == 21
+
+    # ---- 边界条件 ----
+    def test_empty_list(self):
+        assert sum_nested_integers([]) == 0
+
+    def test_empty_dict(self):
+        assert sum_nested_integers({}) == 0
+
+    def test_deeply_nested(self):
+        """深度 100 层嵌套."""
+        data = []
+        inner = data
+        for _ in range(100):
+            inner.append([])
+            inner = inner[0]
+        inner.append(42)
+        assert sum_nested_integers(data) == 42
+
+    def test_single_integer(self):
+        assert sum_nested_integers(42) == 4
+
+    # ---- 异常 / 特殊值 ----
+    def test_bool_not_counted_as_int(self):
+        """bool 是 int 的子类，应该被排除."""
+        assert sum_nested_integers([True, False]) == 0
+
+    def test_non_int_values_ignored(self):
+        data = [1, "hello", 2.5, None, 2]
+        assert sum_nested_integers(data) == 3
+
+    def test_mixed_keys_ignored(self):
+        """字典的键不应参与求和."""
+        assert sum_nested_integers({1: 10, "key": 20}) == 2
+
+    def test_large_numbers(self):
+        assert sum_nested_integers([10**9, -(10**9)]) == 0''',
+        "metadata": {"test_count": 14, "categories": ["基础功能", "深度递归", "类型边界", "大数值"]},
+    },
+}
+
+# ============================================================
 # Commit Message Examples
 # ============================================================
 
@@ -346,9 +547,11 @@ diff --git a/tests/api/test_users.py b/tests/api/test_users.py
 CODE_GEN_EXAMPLES = [CODE_GEN_EASY, CODE_GEN_MEDIUM, CODE_GEN_HARD]
 CODE_REVIEW_EXAMPLES = [CODE_REVIEW_EASY, CODE_REVIEW_MEDIUM, CODE_REVIEW_HARD]
 COMMIT_EXAMPLES = [COMMIT_EASY, COMMIT_MEDIUM, COMMIT_HARD]
+TEST_GEN_EXAMPLES = [TEST_GEN_EASY, TEST_GEN_MEDIUM, TEST_GEN_HARD]
 
 ALL_EXAMPLES = {
     "code_generation": CODE_GEN_EXAMPLES,
     "code_review": CODE_REVIEW_EXAMPLES,
     "commit_message": COMMIT_EXAMPLES,
+    "test_generation": TEST_GEN_EXAMPLES,
 }

@@ -1,0 +1,38 @@
+{
+  "timestamp": "2026-06-01 18:26:04",
+  "cases": {
+    "01_binary_search": {
+      "name": "二分查找（基础算法）",
+      "category": "algorithm"
+    },
+    "02_stack_class": {
+      "name": "栈数据结构（类设计+异常）",
+      "category": "data_structure"
+    },
+    "03_csv_to_json": {
+      "name": "CSV转JSON（文件处理+异常）",
+      "category": "utility"
+    },
+    "04_tree_traversal": {
+      "name": "二叉树遍历（递归）",
+      "category": "recursion"
+    },
+    "05_safe_reader": {
+      "name": "安全文件读取器（防御性编程）",
+      "category": "defensive"
+    }
+  },
+  "gen_success_rate": "5/5",
+  "issues_found_and_fixed": 9,
+  "fixes": [
+    "1. SAFE_BUILTINS 缺少 __import__ → import 语句失败 → 已添加",
+    "2. SAFE_BUILTINS 缺少 __build_class__ → class 定义失败 → 已添加",
+    "3. _extract_code 不识别 corrected_code/fixed_test_code → 已扩展5种key",
+    "4. json.loads 无法处理尾部反斜杠 → 已加容错正则预处理",
+    "5. 测试import模块名与文件名不匹配 → test_generator已加_find_imported_modules",
+    "6. DeepSeek API 长响应截断(max_tokens=4096) → 需增大或分段生成",
+    "7. Windows GBK编码 → stdout/stderr加UTF-8 wrapper",
+    "8. reset_agent()清理不完整 → 已同步清理DB+JSON+checkpointer引用",
+    "9. config.py硬编码API key → 已移除改用纯环境变量"
+  ]
+}

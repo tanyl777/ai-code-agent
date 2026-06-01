@@ -6,9 +6,9 @@ from dataclasses import dataclass, field
 class LLMConfig:
     model: str = "deepseek-v4-pro[1m]"
     temperature: float = 0.1
-    max_tokens: int = 4096
+    max_tokens: int = 16384
     base_url: str = "https://api.deepseek.com/anthropic"
-    api_key: str = field(default_factory=lambda: os.environ.get("ANTHROPIC_API_KEY", "sk-21f342b1878349d99009ef5a6cc5cff4"))
+    api_key: str = field(default_factory=lambda: os.environ.get("ANTHROPIC_API_KEY", ""))
 
 
 @dataclass

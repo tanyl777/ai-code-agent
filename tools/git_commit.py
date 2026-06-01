@@ -19,6 +19,50 @@ def _run_git(repo_path: str, args: list[str]) -> str:
         return ""
 
 
+def _run_git_full(repo_path: str, args: list[str]) -> tuple[int, str, str]:
+    """Run git command, return (returncode, stdout, stderr)."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", repo_path] + args,
+            capture_output=True, text=True, encoding="utf-8",
+        )
+        return result.returncode, result.stdout, result.stderr
+    except (subprocess.SubprocessError, FileNotFoundError) as e:
+        return 1, "", str(e)
+
+
+def git_add(repo_path: str, files: list[str] | None = None) -> tuple[bool, str]:
+    """Stage files for commit. If files is None, stages all changes (git add -A)."""
+    args = ["add", "-A"] if files is None else ["add"] + files
+    rc, stdout, stderr = _run_git_full(repo_path, args)
+    return rc == 0, stderr or stdout
+
+
+def git_commit_exec(repo_path: str, message: str) -> tuple[bool, str]:
+    """Execute git commit with the given message."""
+    rc, stdout, stderr = _run_git_full(repo_path, ["commit", "-m", message])
+    return rc == 0, stdout or stderr
+
+
+def git_push(repo_path: str, remote: str = "origin", branch: str = "") -> tuple[bool, str]:
+    """Push commits to remote. If branch is empty, pushes current branch."""
+    args = ["push", remote]
+    if branch:
+        args.append(branch)
+    rc, stdout, stderr = _run_git_full(repo_path, args)
+    return rc == 0, stdout or stderr
+
+
+def git_get_remote(repo_path: str) -> str:
+    """Get the origin remote URL."""
+    return _run_git(repo_path, ["remote", "get-url", "origin"]).strip()
+
+
+def git_status(repo_path: str) -> str:
+    """Get git status summary."""
+    return _run_git(repo_path, ["status", "--short"])
+
+
 def _get_diffs(repo_path: str) -> tuple[str, str]:
     """Get staged and unstaged diffs from the repository."""
     staged = _run_git(repo_path, ["diff", "--staged", "--unified=3"])
