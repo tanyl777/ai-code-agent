@@ -494,6 +494,11 @@ class AIAgentGUI:
 
         self._update_line_numbers()
 
+        # Progress bar (code gen)
+        self.code_progress = ttk.Progressbar(tab, mode='indeterminate', length=200)
+        self.code_progress.pack(fill=tk.X, pady=(3, 0))
+        self.code_progress.pack_forget()
+
         self._last_generated_code = ""
 
     def _line_height(self): return 17
@@ -568,12 +573,14 @@ class AIAgentGUI:
             messagebox.showwarning("提示", "请输入需求描述")
             return
         self._set_status("⏳ 正在生成代码...")
+        self._progress_start(self.code_progress)
         self._run_async(lambda: self._sync_code_gen(request))
 
     def _sync_code_gen(self, request: str):
         try:
             llm = get_llm()
             result = generate_and_run(request, llm)
+            self._progress_done(self.code_progress)
             if result["status"] == "success":
                 code = result.get("content", "")
                 self._set_code_editor(code)
@@ -593,6 +600,7 @@ class AIAgentGUI:
                     self._append_run_output(exc)
                 self._set_status("❌ 失败")
         except Exception as e:
+            self._progress_done(self.code_progress)
             self._clear_run_output()
             self._append_run_output(f"❌ 异常: {e}")
             self._set_status(f"❌ 错误: {e}")
@@ -621,11 +629,92 @@ class AIAgentGUI:
             else:
                 if result["stdout"]:
                     self._append_run_output(result["stdout"])
-                self._append_run_output(f"\n❌ 运行错误:\n{result['exception']}")
+                exc = result["exception"]
+                self._append_run_output(f"\n❌ 运行错误:\n{exc}")
+                # Check for missing module
+                self._auto_install_missing(exc, code)
                 self._set_status("❌ 运行错误")
         except Exception as e:
             self._append_run_output(f"\n❌ 异常: {e}")
             self._set_status(f"❌ 错误: {e}")
+
+    def _auto_install_missing(self, exc_text: str, code: str):
+        """Detect ModuleNotFoundError / ImportError and offer to pip install/upgrade."""
+        import re
+        # Match: ModuleNotFoundError: No module named 'xxx'
+        mod_match = re.search(r"ModuleNotFoundError: No module named '(\w+(?:\.\w+)*)'", exc_text)
+        # Match: ImportError: cannot import name 'Xxx' from 'xxx.yyy'
+        imp_match = re.search(r"ImportError: cannot import name '\w+' from '(\w+(?:\.\w+)*)'", exc_text)
+
+        if mod_match:
+            pkg = mod_match.group(1)
+            action = "install"
+        elif imp_match:
+            pkg = imp_match.group(1)
+            action = "upgrade"
+        else:
+            return
+
+        top_pkg = pkg.split(".")[0]
+        # Prevent infinite loop
+        if hasattr(self, '_last_install_pkg') and self._last_install_pkg == top_pkg:
+            self._append_run_output(
+                f"\n⚠️ {top_pkg} 已处理但 import 仍失败。\n"
+                f"   '{pkg}' 的 API 可能已变更。\n"
+                f"   请检查代码中的 import 语句，或查阅最新文档。"
+            )
+            return
+        self._last_install_pkg = top_pkg
+
+        pip_map = {
+            "cv2": "opencv-python", "PIL": "Pillow", "sklearn": "scikit-learn",
+            "bs4": "beautifulsoup4", "yaml": "pyyaml", "dotenv": "python-dotenv",
+        }
+        pip_name = pip_map.get(top_pkg, top_pkg)
+
+        if action == "install":
+            msg = f"检测到缺少模块: {top_pkg}\n\n要自动安装吗?\n\npip install {pip_name}"
+        else:
+            msg = f"检测到导入错误: {pkg}\n\n模块存在但缺少该名称，可能是版本过旧。\n\n要尝试升级吗?\n\npip install --upgrade {pip_name}"
+
+        if messagebox.askyesno("缺少依赖" if action == "install" else "导入错误", msg):
+            self._set_status(f"⏳ 正在{'安装' if action=='install' else '升级'} {pip_name}...")
+            self._run_async(lambda: self._do_install_and_rerun(pip_name, code, upgrade=(action=="upgrade")))
+
+    def _do_install_and_rerun(self, pkg: str, code: str, upgrade: bool = False):
+        """pip install/upgrade a package then re-run the code."""
+        import subprocess
+        try:
+            args = [sys.executable, "-m", "pip", "install", pkg, "-q"]
+            if upgrade: args.insert(4, "--upgrade")
+            r = subprocess.run(args, capture_output=True, text=True, timeout=120)
+            if r.returncode == 0:
+                action = "升级" if upgrade else "安装"
+                self._append_run_output(f"\n✅ pip {action} {pkg} 成功\n{'═'*40}\n")
+                self._set_status(f"✅ {pkg} 安装成功，重新执行...")
+                result = _execute_code(code)
+                if result["exception"] is None:
+                    if result["stdout"]: self._append_run_output(result["stdout"])
+                    else: self._append_run_output("(无输出)\n")
+                    self._append_run_output("\n✅ 执行成功")
+                    self._set_status("✅ 运行成功")
+                else:
+                    exc = result["exception"]
+                    self._append_run_output(f"\n{exc}")
+                    # Same error after install/upgrade → outdated API
+                    if ("ModuleNotFoundError" in exc or "ImportError" in exc) and pkg in exc:
+                        self._append_run_output(
+                            f"\n⚠️ {pkg} 已{'升级' if upgrade else '安装'}但仍报错。\n"
+                            f"   API 可能已变更，请检查导入语句。\n"
+                            f"   建议: 在编辑器中修改 import 后重新运行。"
+                        )
+                    self._set_status("❌ 运行错误（可能 API 已过时）")
+            else:
+                self._append_run_output(f"\n❌ pip install 失败:\n{r.stderr}")
+                self._set_status("❌ 安装失败")
+        except Exception as e:
+            self._append_run_output(f"\n❌ 安装异常: {e}")
+            self._set_status("❌ 安装失败")
 
     def _do_debug_code(self):
         """Run code in debug mode — show line trace, full var dump at breakpoints."""
@@ -715,6 +804,11 @@ class AIAgentGUI:
         ttk.Button(btn_frame, text="清空输出", command=lambda: self.review_output.delete("1.0", tk.END)).pack(
             side=tk.RIGHT, padx=5)
 
+        # Progress bar
+        self.review_progress = ttk.Progressbar(tab, mode='indeterminate', length=200)
+        self.review_progress.pack(fill=tk.X, pady=(3, 0))
+        self.review_progress.pack_forget()
+
         ttk.Label(tab, text="审查报告：", style="Section.TLabel").pack(anchor=tk.W)
         self.review_output = scrolledtext.ScrolledText(
             tab, font=("Consolas", 10), relief=tk.GROOVE, borderwidth=1,
@@ -757,11 +851,13 @@ class AIAgentGUI:
             messagebox.showwarning("提示", "请输入文件路径或代码")
             return
         self._set_status("⏳ 正在审查代码...")
+        self._progress_start(self.review_progress)
         self._run_async(lambda: self._sync_review(source, self.complexity_var.get()))
 
     def _sync_review(self, source: str, complexity: int):
         try:
             result = review_code(source, complexity)
+            self._progress_done(self.review_progress)
             self._show_result(self.review_output, result, is_json=self.review_json_var.get())
             # Build issues summary for fix prompt
             issues_text = []
@@ -875,6 +971,11 @@ class AIAgentGUI:
         self.test_json_var = tk.BooleanVar()
         ttk.Checkbutton(btn_frame, text="JSON 输出", variable=self.test_json_var).pack(side=tk.LEFT, padx=10)
         ttk.Button(btn_frame, text="💾 保存测试代码", command=self._save_test_code).pack(side=tk.LEFT, padx=5)
+
+        # Progress bar
+        self.test_progress = ttk.Progressbar(tab, mode='indeterminate', length=200)
+        self.test_progress.pack(fill=tk.X, pady=(3, 0))
+        self.test_progress.pack_forget()
         ttk.Button(btn_frame, text="清空输出", command=lambda: self.test_output.delete("1.0", tk.END)).pack(
             side=tk.RIGHT, padx=5)
 
@@ -936,20 +1037,73 @@ class AIAgentGUI:
             messagebox.showwarning("提示", "请输入文件路径或代码")
             return
         self._set_status("⏳ 正在生成测试...")
+        self._progress_start(self.test_progress)
         self._run_async(lambda: self._sync_test_gen(source, self.retry_var.get()))
 
     def _sync_test_gen(self, source: str, max_retries: int):
         try:
             llm = get_llm()
             result = generate_and_test(source, llm, max_retries=max_retries)
+            self._progress_done(self.test_progress)
             self._last_test_code = result.get("content", "")
             self._show_result(self.test_output, result, is_json=self.test_json_var.get())
             self._show_actions(self.test_actions)
             ok = result["status"] == "success"
-            self._set_status("✅ 测试通过" if ok else "❌ 测试失败")
+            if ok:
+                self._set_status("✅ 测试通过")
+            else:
+                self._set_status("❌ 测试失败，正在分析原因...")
+                self._analyze_test_failure(source, result)
         except Exception as e:
             self._show_error(self.test_output, e)
             self._set_status(f"❌ 错误: {e}")
+
+    def _analyze_test_failure(self, source: str, result: dict):
+        """Use LLM to analyze why tests failed and suggest fixes."""
+        test_code = result.get("content", "")
+        test_output = result.get("metadata", {}).get("test_output", "")
+        test_stderr = result.get("metadata", {}).get("test_stderr", "")
+        error_text = test_stderr or test_output
+
+        if not error_text:
+            self._append_run_output("\n⚠️ 未获取到错误详情，请查看上方测试输出。")
+            self._set_status("❌ 测试失败")
+            return
+
+        self._run_async(lambda: self._do_analyze_failure(source, test_code, error_text))
+
+    def _do_analyze_failure(self, source_code: str, test_code: str, error_text: str):
+        """Background: ask LLM to analyze test failure."""
+        try:
+            prompt = f"""以下测试执行失败，请分析原因并给出修复建议。
+
+源代码：
+```python
+{source_code[:3000]}
+```
+
+测试代码：
+```python
+{test_code[:4000]}
+```
+
+错误信息：
+{error_text[:2000]}
+
+请用中文简短回答：
+1. 失败原因（是测试写错了，还是源代码有问题？）
+2. 修复建议（具体怎么改）"""
+            llm = get_llm()
+            resp = llm.invoke(prompt)
+            raw = resp.content if hasattr(resp, "content") else str(resp)
+            if isinstance(raw, list):
+                raw = "".join(b.get("text","") if isinstance(b,dict) and b.get("type")!="thinking" else "" for b in raw)
+
+            analysis = f"\n{'─'*50}\n📊 失败分析 & 修复建议\n{'─'*50}\n{raw.strip()}\n{'─'*50}\n"
+            self._append_run_output(analysis)
+            self._set_status("📊 测试失败 — 分析完成")
+        except Exception as e:
+            self._append_run_output(f"\n{'─'*50}\n⚠️ 分析失败: {e}\n")
 
     # ═══════════════════════════════════════════════
     # Tab 4: Commit 生成
@@ -1492,6 +1646,21 @@ class AIAgentGUI:
             self.review_input.delete("1.0", tk.END)
             self.review_input.insert("1.0", self._last_test_code)
         self._jump_to_tab(1)
+
+    def _progress_start(self, bar):
+        """Show indeterminate progress bar."""
+        def _do(): bar.pack(fill=tk.X, pady=(3, 0)); bar.start(10)
+        self.root.after(0, _do)
+
+    def _progress_done(self, bar):
+        """Stop indeterminate and show 100%."""
+        def _do(): bar.stop(); bar.config(mode='determinate', value=100)
+        self.root.after(0, _do)
+
+    def _progress_hide(self, bar):
+        """Hide progress bar."""
+        def _do(): bar.pack_forget(); bar.config(mode='indeterminate', value=0)
+        self.root.after(0, _do)
 
     # ═══════════════════════════════════════════════
     # Helpers
