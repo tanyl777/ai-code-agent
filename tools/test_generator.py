@@ -40,6 +40,11 @@ def _extract_code(text: str) -> str:
         for key in ("corrected_test_code", "corrected_test", "code", "content"):
             if key in data and isinstance(data[key], str):
                 return data[key].strip()
+        # Fallback: find any string value that looks like Python code
+        for key, val in data.items():
+            if isinstance(val, str) and len(val) > 50:
+                if "import" in val or "def " in val or "class " in val:
+                    return val.strip()
     except (_json.JSONDecodeError, TypeError):
         pass
 

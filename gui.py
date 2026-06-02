@@ -721,12 +721,28 @@ class AIAgentGUI:
         )
         self.review_output.pack(fill=tk.BOTH, expand=True)
 
-        # Action bar
+        # Fix output area (hidden until fix is generated)
+        self.review_fix_output = scrolledtext.ScrolledText(
+            tab, font=("Consolas", 10), relief=tk.GROOVE, borderwidth=1,
+            background="#1a2a1a", foreground="#90ee90",
+        )
+        self.review_fix_output.pack(fill=tk.BOTH, expand=True)
+        self.review_fix_output.pack_forget()
+
+        # Action bar (always visible)
         self.review_actions = ttk.Frame(tab)
         self.review_actions.pack(fill=tk.X, pady=(5, 0))
+        ttk.Button(self.review_actions, text="🔧 自动修复", command=self._do_review_fix).pack(side=tk.LEFT, padx=5)
         ttk.Button(self.review_actions, text="🧪 生成测试 →", command=self._jump_to_test_with_code).pack(side=tk.LEFT, padx=5)
         ttk.Button(self.review_actions, text="📋 生成 Commit →", command=self._jump_to_commit).pack(side=tk.LEFT, padx=5)
-        self.review_actions.pack_forget()
+
+        # Fix action bar (always visible)
+        self.review_fix_actions = ttk.Frame(tab)
+        self.review_fix_actions.pack(fill=tk.X, pady=(5, 0))
+        ttk.Button(self.review_fix_actions, text="📝 应用到编辑器", command=self._apply_fix_to_editor).pack(side=tk.LEFT, padx=5)
+        ttk.Button(self.review_fix_actions, text="💾 保存修复代码", command=self._save_fixed_code).pack(side=tk.LEFT, padx=5)
+        self._last_fixed_code = ""
+        self._last_review_issues = ""
 
     def _browse_review_file(self):
         path = filedialog.askopenfilename(filetypes=[("Python files", "*.py"), ("All files", "*.*")])
@@ -747,12 +763,88 @@ class AIAgentGUI:
         try:
             result = review_code(source, complexity)
             self._show_result(self.review_output, result, is_json=self.review_json_var.get())
-            self._show_actions(self.review_actions)
+            # Build issues summary for fix prompt
+            issues_text = []
+            for iss in result.get("content", []):
+                issues_text.append(f"L{iss['line']}: [{iss['severity']}] {iss['issue']} → {iss['suggestion']}")
+            self._last_review_issues = "\n".join(issues_text)
+            self.review_fix_output.pack_forget()
+            self.review_output.pack(fill=tk.BOTH, expand=True)
             n = result["metadata"]["total_issues"]
             self._set_status(f"审查完成 — {n} 个问题" if n else "✅ 审查通过，未发现问题")
         except Exception as e:
             self._show_error(self.review_output, e)
             self._set_status(f"❌ 错误: {e}")
+
+    def _do_review_fix(self):
+        """Use LLM to fix all review issues in the code."""
+        code = self.review_input.get("1.0", tk.END).strip()
+        if not code or not self._last_review_issues:
+            messagebox.showwarning("提示", "请先审查代码")
+            return
+        if not self._ensure_ready(): return
+        self._set_status("🔧 正在修复代码...")
+        self._run_async(lambda: self._sync_review_fix(code))
+
+    def _sync_review_fix(self, code: str):
+        try:
+            prompt = f"""以下 Python 代码有以下问题，请修复所有问题并返回完整修正后的代码。
+
+原始代码：
+```python
+{code}
+```
+
+审查发现的问题：
+{self._last_review_issues}
+
+要求：修复所有问题，只输出修正后的完整 Python 代码，不要输出分析过程。"""
+            llm = get_llm()
+            resp = llm.invoke(prompt)
+            raw = resp.content if hasattr(resp, "content") else str(resp)
+            if isinstance(raw, list):
+                raw = "".join(b.get("text","") if isinstance(b,dict) and b.get("type")!="thinking" else "" for b in raw)
+            # Extract code
+            import re
+            code_match = re.search(r"```(?:python)?\s*\n(.*?)```", raw, re.DOTALL)
+            fixed = code_match.group(1).strip() if code_match else raw.strip()
+            self._last_fixed_code = fixed
+
+            def _show():
+                # Hide review output, show fix output
+                self.review_output.pack_forget()
+                self.review_fix_output.pack(fill=tk.BOTH, expand=True)
+                self.review_fix_output.delete("1.0", tk.END)
+                self.review_fix_output.insert("1.0", fixed)
+            self.root.after(0, _show)
+            self._set_status("✅ 代码已修复，可应用到编辑器")
+        except Exception as e:
+            self._set_status(f"❌ 修复失败: {e}")
+
+    def _apply_fix_to_editor(self):
+        """Copy fixed code back to the code generator editor."""
+        if not self._last_fixed_code:
+            messagebox.showwarning("提示", "请先执行修复")
+            return
+        self._set_code_editor(self._last_fixed_code)
+        self._jump_to_tab(0)
+        self._set_status("📝 修复代码已应用到编辑器")
+
+    def _save_fixed_code(self):
+        """Save the fixed code to a file."""
+        if not self._last_fixed_code:
+            messagebox.showwarning("提示", "请先执行修复")
+            return
+        from pathlib import Path
+        default_dir = Path(self.repo_path_var.get()).resolve() / "generated"
+        default_dir.mkdir(parents=True, exist_ok=True)
+        path = filedialog.asksaveasfilename(
+            defaultextension=".py", filetypes=[("Python files", "*.py")],
+            initialdir=str(default_dir), initialfile="fixed_code.py",
+        )
+        if path:
+            Path(path).write_text(self._last_fixed_code, encoding="utf-8")
+            self._set_status(f"💾 修复代码已保存: {path}")
 
     # ═══════════════════════════════════════════════
     # Tab 3: 测试生成
@@ -809,12 +901,29 @@ class AIAgentGUI:
         if not self._last_test_code:
             messagebox.showwarning("提示", "请先生成测试代码")
             return
+        # Generate filename from source input
+        import re
+        raw = self.test_input.get("1.0", tk.END).strip()
+        if "\n" in raw:
+            # It's inline code - extract function name
+            from pathlib import Path as _Path
+            funcs = re.findall(r"def\s+(\w+)", raw)
+            if funcs:
+                name = funcs[0]
+            else:
+                classes = re.findall(r"class\s+(\w+)", raw)
+                name = classes[0] if classes else "generated"
+            filename = f"test_{name}.py"
+        else:
+            # It's a file path - use its stem
+            p = _Path(raw)
+            filename = f"test_{p.stem}.py"
         from pathlib import Path
         default_dir = Path(self.repo_path_var.get()).resolve() / "tests"
         default_dir.mkdir(parents=True, exist_ok=True)
         path = filedialog.asksaveasfilename(
             defaultextension=".py", filetypes=[("Python files", "*.py")],
-            initialdir=str(default_dir), initialfile="test_generated.py",
+            initialdir=str(default_dir), initialfile=filename,
         )
         if path:
             Path(path).write_text(self._last_test_code, encoding="utf-8")

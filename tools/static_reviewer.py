@@ -182,6 +182,185 @@ def _check_imports(code: str) -> list[dict[str, Any]]:
     return issues
 
 
+def _check_undefined_vars(code: str) -> list[dict[str, Any]]:
+    """Detect variables that are used but never defined in scope."""
+    issues = []
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return issues
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        # Collect assigned names inside this function
+        assigned = set()
+        assigned.update(a.arg for a in node.args.args)  # parameters
+        if node.args.vararg: assigned.add(node.args.vararg.arg)
+        if node.args.kwarg: assigned.add(node.args.kwarg.arg)
+        used = set()
+
+        for child in ast.walk(node):
+            if isinstance(child, ast.Name):
+                if isinstance(child.ctx, ast.Store):
+                    assigned.add(child.id)
+                elif isinstance(child.ctx, ast.Load):
+                    used.add(child.id)
+            elif isinstance(child, ast.arg):
+                assigned.add(child.arg)
+
+        # Filter builtins
+        builtins = {"print", "len", "range", "int", "str", "list", "dict", "set", "tuple",
+                     "bool", "float", "abs", "max", "min", "sum", "sorted", "reversed",
+                     "enumerate", "zip", "map", "filter", "isinstance", "issubclass",
+                     "hasattr", "getattr", "type", "super", "Exception", "ValueError",
+                     "TypeError", "True", "False", "None", "random", "time", "open"}
+        undefined = used - assigned - builtins - {"self", "cls"}
+
+        for name in sorted(undefined):
+            # Find first use line
+            for child in ast.walk(node):
+                if isinstance(child, ast.Name) and child.id == name and isinstance(child.ctx, ast.Load):
+                    issues.append({
+                        "severity": "ERROR",
+                        "line": child.lineno,
+                        "issue": f"变量 '{name}' 未定义（可能是拼写错误）",
+                        "suggestion": f"检查 '{name}' 是否拼写正确，或是否忘记定义/导入",
+                    })
+                    break
+    return issues
+
+
+_COMMON_TYPOS = {
+    "printf": "print",
+    "warpper": "wrapper",
+    "attemp": "attempt",
+    "fumc": "func",
+    "fucn": "func",
+    "fucntion": "function",
+    "retrun": "return",
+    "improt": "import",
+    "defualt": "default",
+    "excepet": "except",
+    "rasing": "raising",
+    "__main__": None,  # special: check for _main_ mistake
+}
+
+
+def _check_common_typos(code: str) -> list[dict[str, Any]]:
+    """Detect common variable name typos."""
+    issues = []
+    lines = code.split("\n")
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        # Check for _main_ instead of __main__
+        if "name" in stripped and '"_main_"' in stripped:
+            issues.append({
+                "severity": "ERROR",
+                "line": i,
+                "issue": "使用了 '_main_' 而不是 '__main__'（双下划线）",
+                "suggestion": "改为: if __name__ == '__main__'",
+            })
+        # Check for common typos in variable names
+        import re
+        for line_word in re.findall(r'\b\w+\b', stripped):
+            if line_word in _COMMON_TYPOS and _COMMON_TYPOS[line_word] is not None:
+                issues.append({
+                    "severity": "ERROR",
+                    "line": i,
+                    "issue": f"疑似拼写错误: '{line_word}'，可能想写 '{_COMMON_TYPOS[line_word]}'",
+                    "suggestion": f"将 '{line_word}' 改为 '{_COMMON_TYPOS[line_word]}'",
+                })
+                break  # one issue per line
+    return issues
+
+
+def _check_param_usage(code: str) -> list[dict[str, Any]]:
+    """Detect parameter name mismatches (e.g., decorator using wrong param names)."""
+    issues = []
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return issues
+
+    # Get all function definitions and their parameter names
+    func_params = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            params = set()
+            for a in node.args.args:
+                params.add(a.arg)
+            if node.args.vararg:
+                params.add(node.args.vararg.arg)
+            func_params[node.name] = params
+
+    # Find decorator calls and check param names
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                caller = node.func.id
+                if caller in func_params:
+                    expected = func_params[caller]
+                    for kw in node.keywords:
+                        if kw.arg and kw.arg not in expected:
+                            close = _closest_match(kw.arg, expected)
+                            hint = f"，参数名不匹配。'{caller}' 定义的参数: {expected}"
+                            if close:
+                                hint += f"，可能想写 '{close}'"
+                            issues.append({
+                                "severity": "ERROR",
+                                "line": node.lineno,
+                                "issue": f"调用 '{caller}' 时使用了不存在的参数 '{kw.arg}'",
+                                "suggestion": hint,
+                            })
+
+    # Also check variable usage consistency in functions
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        params = {a.arg for a in node.args.args}
+        used_in_body = set()
+        for child in ast.walk(node):
+            if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
+                used_in_body.add(child.id)
+        # Check if any used name is a near-miss of a parameter
+        for used in used_in_body:
+            for param in params:
+                if _similar(used, param) and used != param:
+                    issues.append({
+                        "severity": "ERROR",
+                        "line": node.lineno,
+                        "issue": f"函数内使用了 '{used}'，但参数名是 '{param}'，可能是拼写错误",
+                        "suggestion": f"将 '{used}' 改为 '{param}'，或检查变量来源",
+                    })
+                    break
+    return issues
+
+
+def _similar(a: str, b: str) -> bool:
+    """Check if two strings are similar (one char off)."""
+    if abs(len(a) - len(b)) > 1:
+        return False
+    # Simple edit distance check
+    diffs = 0
+    for i in range(min(len(a), len(b))):
+        if a[i] != b[i]:
+            diffs += 1
+    diffs += abs(len(a) - len(b))
+    return diffs <= 1
+
+
+def _closest_match(target: str, candidates: set[str]) -> str | None:
+    """Find the closest matching candidate string."""
+    best, best_dist = None, 999
+    for c in candidates:
+        # Simple character overlap check
+        common = sum(1 for ch in target if ch in c)
+        if common > len(target) * 0.5 and common > best_dist:
+            best, best_dist = c, common
+    return best if best_dist > 0 else None
+
+
 def review_code(source: str, max_complexity: int = 10) -> dict[str, Any]:
     """Run all static analysis checks on the given code.
 
@@ -200,6 +379,9 @@ def review_code(source: str, max_complexity: int = 10) -> dict[str, Any]:
         + _check_complexity(code, max_complexity)
         + _check_bug_patterns(code)
         + _check_imports(code)
+        + _check_undefined_vars(code)
+        + _check_common_typos(code)
+        + _check_param_usage(code)
     )
 
     errors = sum(1 for i in all_issues if i["severity"] == "ERROR")
